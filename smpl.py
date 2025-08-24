@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 import numpy as np
 from typing import Optional, Dict, Any
+import trimesh
 import pickle
 from lbs import (
     lbs, vertices2landmarks, find_dynamic_lmk_idx_and_bcoords, blend_shapes)
@@ -80,29 +81,36 @@ class Smpl(nn.Module):
         self.batch_size = batch_size
         self.num_betas = num_betas
 
-        self.device = device
+        self.to(device)
         dd = np.load(model_path, allow_pickle=True)
 
         # Convert smpl model parameters to torch tensors and register as buffers
         self.faces = dd['f']
-        self.register_buffer('faces_tensor', torch.from_numpy(dd['f']).long())
-        self.register_buffer('v_template', torch.from_numpy(dd['v_template']).float())
+        self.register_buffer('faces_tensor', torch.from_numpy(self.faces).long().to(device))
+        self.vertices = dd['v_template']
+        self.register_buffer('v_template', torch.from_numpy(self.vertices).float().to(device))
+        mesh = trimesh.Trimesh(vertices=self.vertices, faces=self.faces)
+        self.register_buffer('vertex_normals', torch.from_numpy(mesh.vertex_normals.copy()).float().to(device))
         posedirs = np.reshape(dd['posedirs'], [-1, dd['posedirs'].shape[-1]]).T
-        self.register_buffer('posedirs', torch.from_numpy(posedirs).float())
+        self.register_buffer('posedirs', torch.from_numpy(posedirs).float().to(device))
         shapedirs = dd['shapedirs']
         shapedirs = shapedirs[:, :, :num_betas]
-        self.register_buffer('shapedirs', torch.from_numpy(shapedirs).float())
-        self.register_buffer('lbs_weights', torch.from_numpy(dd['weights']).float())
-        self.register_buffer('J_regressor', torch.from_numpy(dd['J_regressor']).float())
+        self.register_buffer('shapedirs', torch.from_numpy(shapedirs).float().to(device))
+        self.register_buffer('lbs_weights', torch.from_numpy(dd['weights']).float().to(device))
+        self.register_buffer('J_regressor', torch.from_numpy(dd['J_regressor']).float().to(device))
         parents = dd['kintree_table'][0]
         parents[0] = -1
-        self.register_buffer('parents', torch.from_numpy(parents).long())
+        self.register_buffer('parents', torch.from_numpy(parents).long().to(device))
 
         default_body_pose = torch.zeros([batch_size, self.NUM_BODY_JOINTS * 3])
-        self.body_pose = nn.Parameter(default_body_pose, requires_grad=True)
+        self.body_pose = nn.Parameter(default_body_pose, requires_grad=True).to(device)
 
         vertex_ids = VERTEX_IDS['smplh']
-        self.vertex_joint_selector = VertexJointSelector(vertex_ids=vertex_ids)
+        self.vertex_joint_selector = VertexJointSelector(vertex_ids=vertex_ids, device = device)
+
+        vertex_faces = Smpl.vertex_faces_sorted(mesh)
+        self.register_buffer('vertex_faces', torch.from_numpy(vertex_faces).long().to(device))
+
 
     def forward(
             self,
@@ -160,19 +168,17 @@ class Smpl(nn.Module):
 
         full_pose = torch.cat([global_orient, body_pose], dim=1)
 
-        batch_size = max(betas.shape[0], global_orient.shape[0],
-                         body_pose.shape[0])
+        batch_size = body_pose.shape[0]
 
-        if betas.shape[0] != batch_size:
-            num_repeats = int(batch_size / betas.shape[0])
-            betas = betas.expand(num_repeats, -1)
+        if betas.dim()==1:
+            betas = betas.expand(batch_size, -1)
 
         vertices, joints = lbs(betas, full_pose, self.v_template,
                                self.shapedirs, self.posedirs,
                                self.J_regressor, self.parents,
                                self.lbs_weights, pose2rot=pose2rot)
 
-        joints = self.vertex_joint_selector(vertices, joints)
+        # joints = self.vertex_joint_selector(vertices, joints)
 
         if apply_trans:
             joints += transl.unsqueeze(dim=1)
@@ -186,6 +192,19 @@ class Smpl(nn.Module):
                 'full_pose':full_pose if return_full_pose else None}
 
         return output
+
+    @staticmethod
+    def vertex_faces_sorted(mesh):
+        # 把某点对应的face id按三角形面积从小到大排列
+
+        area = mesh.area_faces[mesh.vertex_faces]
+
+        mask = (mesh.vertex_faces == -1)  # 去除无效项
+
+        area[mask] = np.inf
+
+        vertex_faces_id  = np.take_along_axis(mesh.vertex_faces, np.argsort(area, axis=-1), axis=-1)
+        return vertex_faces_id
 
 
 class Smplx(nn.Module):
@@ -210,12 +229,12 @@ class Smplx(nn.Module):
         self.num_betas = num_betas
         self.num_expression_coeffs = num_expression_coeffs
         self.num_pca_comps = num_pca_comps
-        self.device = device
+        self.to(device)
         dd = np.load(model_path, allow_pickle=True)
 
         # Convert smpl model parameters to torch tensors and register as buffers
         self.faces = dd['f']
-        self.register_buffer('faces_tensor', torch.from_numpy(dd['f']).long())
+        self.register_buffer('faces_tensor', torch.from_numpy(dd['f'].astype(np.int64)).long())
         self.register_buffer('v_template', torch.from_numpy(dd['v_template']).float())
         posedirs = np.reshape(dd['posedirs'], [-1, dd['posedirs'].shape[-1]]).T
         self.register_buffer('posedirs', torch.from_numpy(posedirs).float())
@@ -283,12 +302,13 @@ class Smplx(nn.Module):
         pose_mean = torch.concatenate([global_orient_mean, body_pose_mean,
                                     jaw_pose_mean,
                                     leye_pose_mean, reye_pose_mean,
-                                    self.left_hand_mean, self.right_hand_mean],
+                                    torch.zeros_like(self.left_hand_mean),
+                                       torch.zeros_like(self.right_hand_mean)],
                                    axis=0)
-        pose_mean_tensor = torch.tensor(pose_mean, dtype=torch.float32)
+        pose_mean_tensor = pose_mean.clone().detach().to(torch.float32)
         self.register_buffer('pose_mean', pose_mean_tensor)
         vertex_ids = VERTEX_IDS['smplx']
-        self.vertex_joint_selector = VertexJointSelector(vertex_ids=vertex_ids)
+        self.vertex_joint_selector = VertexJointSelector(vertex_ids=vertex_ids, device = device)
 
         
 
@@ -450,7 +470,7 @@ class VertexJointSelector(nn.Module):
                 [extra_joints_idxs, tips_idxs])
 
         self.register_buffer('extra_joints_idxs',
-                             torch.from_numpy(extra_joints_idxs).long())
+                             torch.from_numpy(extra_joints_idxs).long().to(kwargs['device']))
 
     def forward(self, vertices, joints):
         extra_joints = torch.index_select(vertices, 1, self.extra_joints_idxs.to(torch.long)) #The '.to(torch.long)'.

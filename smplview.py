@@ -5,133 +5,162 @@ import numpy as np
 import torch
 
 from smpl import Smplx, Smpl
+from utils import visualize,visualize_trimesh
+from pytorch3d.ops.knn import  knn_points
 
-def main(model_type='smpl',
-         ext='npz',
-         gender='neutral',
-         plot_joints=True,
-         num_betas=10,
-         sample_shape=True,
-         sample_expression=False,
-         num_expression_coeffs=10,
-         plotting_module='pyrender',
-         use_face_contour=False):
+smplx_marker_id = {
+    'head':8994,
+    'chest':5533,
+    'left_arm':3952,
+    'left_forearm':4580,
+    'left_hand':4612,
+    'left_leg':3610,
+    'left_shin':3746,
+    'left_foot':5894,
+    'right_arm':8133,
+    'right_forearm':7316,
+    'right_hand':7348,
+    'right_leg':6371,
+    'right_shin':6504,
+    'right_foot':8588
+}
+
+smpl_marker_id = {
+    'head':335,
+    'chest':3073,
+    'left_arm':2821,
+    'left_forearm':1591,
+    'left_hand':2000,
+    'left_leg':981,
+    'left_shin':1115,
+    'left_foot':3341,
+    'right_arm':4794,
+    'right_forearm':5059,
+    'right_hand':5459,
+    'right_leg':4465,
+    'right_shin':4599,
+    'right_foot':6742
+}
 
 
-    # model = Smplx(model_path='/home/lanhai/restore/dataset/mocap/models/smplx/SMPLX_NEUTRAL.npz')
-    # model = Smplx(model_path='/home/lanhai/Projects/HPE/support_data/smplx/neutral/model.npz')
+def smplx2smpl():
+    all_vid = [value for value in smplx_marker_id.values()]
+    smplx_model = Smplx(model_path='/home/lanhai/Projects/HPE/support_data/smplx/neutral/model.npz')
+    smpl_model = Smpl(model_path='/home/lanhai/restore/dataset/mocap/models/smpl/SMPL_NEUTRAL.npz')
+
+    smplx_faces = smplx_model.faces
+    smpl_faces = smpl_model.faces
+
+    smpl_betas = torch.zeros([1, smpl_model.num_betas], dtype=torch.float32)
+    smplx_betas = torch.zeros([1, smplx_model.num_betas], dtype=torch.float32)
+    expression = torch.zeros(
+        [1, smplx_model.num_expression_coeffs], dtype=torch.float32)
+    smpl_output = smpl_model(betas=smpl_betas,
+                   body_pose=None,
+                   global_orient=torch.tensor([[np.pi / 2, 0, 0]]),
+                   transl=None,
+                   return_verts=True)
+
+    smplx_output = smplx_model(betas=smplx_betas,
+                   body_pose=None,
+                   global_orient=torch.tensor([[np.pi / 2, 0, 0]]),
+                   transl=None,
+                   expression = expression,
+                   return_verts=True)
+
+    smpl_joints = smpl_output['joints'].squeeze()
+    smplx_joints = smplx_output['joints'].squeeze()
+    smpl_vertices = smpl_output['vertices'].squeeze()
+    smplx_vertices = smplx_output['vertices'].squeeze()
+
+    # offset = torch.mean(smplx_vertices, dim = 0) - torch.mean(smpl_vertices,dim=0)
+    offset = smplx_joints[0] - smpl_joints[0]
+
+    smpl_vertices = smpl_vertices + offset[None,:]
+    markers = smplx_vertices[all_vid]
+    dist, idx, _ = knn_points(markers[None,...], smpl_vertices[None,...], K=1, return_nn=False)
+    corr_id = [item for item in zip(all_vid, idx.squeeze().tolist())]
+
+    vertices = torch.concatenate([smpl_vertices, smplx_vertices])
+    faces = np.concatenate([smpl_faces, smplx_faces+6890])
+
+    # vertices = smpl_vertices
+    # faces = smpl_model.faces
+    # markers = vertices[idx.squeeze().tolist()]
+
+    visualize(vertices.detach().cpu().numpy(), faces, [markers.detach().cpu().numpy()])
+
+    print(corr_id)
+
+def plot_smpl():
     model = Smpl(model_path='/home/lanhai/restore/dataset/mocap/models/smpl/SMPL_NEUTRAL.npz')
-
+    all_vid = [value for value in smpl_marker_id.values()]
 
     print(model)
-    betas, expression = None, None
-    if sample_shape:
-        betas = torch.randn([1, model.num_betas], dtype=torch.float32)
-    if sample_expression:
-        expression = torch.randn(
-            [1, model.num_expression_coeffs], dtype=torch.float32)
-    bodypose = 0.5*torch.pi*torch.randn([1, 23*3], dtype=torch.float32)
-    transl = torch.randn([1,  3], dtype=torch.float32)
+    betas = torch.randn([1, model.num_betas], dtype=torch.float32)
+    # bodypose = 0.5*torch.pi*torch.randn([1, 23*3], dtype=torch.float32)
+    bodypose = None
+    transl = torch.randn([1, 3], dtype=torch.float32)
 
-
-
-
-    output = model( betas=betas,
-                    body_pose=bodypose,
-                    global_orient = torch.tensor([[np.pi/2,0,0]]),
-                    transl = None,
-                    expression=expression,
-                    return_verts=True)
+    output = model(betas=betas,
+                   body_pose=bodypose,
+                   global_orient=torch.tensor([[0, 0, 0]]),
+                   transl=None,
+                   return_verts=True)
     vertices = output['vertices'].detach().cpu().numpy().squeeze()
     joints = output['joints'].detach().cpu().numpy().squeeze()
-
+    faces = model.faces
     print('Vertices shape =', vertices.shape)
     print('Joints shape =', joints.shape)
 
-    if plotting_module == 'pyrender':
-        import pyrender
-        import trimesh
-        vertex_colors = np.ones([vertices.shape[0], 4]) * [0.3, 0.3, 0.3, 0.8]
-        tri_mesh = trimesh.Trimesh(vertices, model.faces,
-                                   vertex_colors=vertex_colors)
+    # smpl_joints = [joints[0:24],  # 身体关节，红色 [0:22]
+    #                joints[24:]]  # 脸部关节，蓝色 [22:25]
 
-        mesh = pyrender.Mesh.from_trimesh(tri_mesh)
+    smpl_joints = [joints[0:24],  # 身体关节，红色 [0:22]
+                   joints[24:],
+                   vertices[all_vid]]
 
-        scene = pyrender.Scene()
-        scene.add(mesh)
+    visualize(vertices, faces, smpl_joints)
 
-        if plot_joints:
-            # 定义不同颜色区间和对应的颜色 (RGBA格式)
-            color_ranges = [
-                (0, 22, [0.9, 0.1, 0.1, 1.0]),  # 红色 [0:22]
-                (22, 25, [0.1, 0.1, 0.9, 1.0]),  # 蓝色 [22:25]
-                (25, 55, [0.1, 0.9, 0.1, 1.0]),  # 绿色 [25:55]
-                (55, 127, [0.9, 0.9, 0.1, 1.0])  # 黄色 [55:127]
-            ]
 
-            # 为每个颜色区间创建球体并添加到场景
-            for start_idx, end_idx, color in color_ranges:
-                if start_idx >= len(joints):  # 避免索引越界
-                    continue
+def plot_smplx():
+    all_vid = [value for value in smplx_marker_id.values()]
+    model = Smplx(model_path='/home/lanhai/Projects/HPE/support_data/smplx/neutral/model.npz')
+    print(model)
+    betas, expression = None, None
+    betas = torch.randn([1, model.num_betas], dtype=torch.float32)
+    expression = torch.randn(
+            [1, model.num_expression_coeffs], dtype=torch.float32)
+    # bodypose = 0.5*torch.pi*torch.randn([1, 23*3], dtype=torch.float32)
+    bodypose = None
+    transl = torch.randn([1, 3], dtype=torch.float32)
 
-                # 截取当前区间的关节
-                current_joints = joints[start_idx:end_idx]
-                if len(current_joints) == 0:
-                    continue
+    output = model(betas=betas,
+                   body_pose=bodypose,
+                   global_orient=torch.tensor([[np.pi / 2, 0, 0]]),
+                   transl=None,
+                   expression=expression,
+                   return_verts=True)
+    vertices = output['vertices'].detach().cpu().numpy().squeeze()
+    joints = output['joints'].detach().cpu().numpy().squeeze()
+    faces = model.faces
+    markers = vertices[all_vid]
+    print('Vertices shape =', vertices.shape)
+    print('Joints shape =', joints.shape)
 
-                # 创建对应颜色的球体
-                sm = trimesh.creation.uv_sphere(radius=0.005)
-                sm.visual.vertex_colors = color
+    # smpl_joints = [joints[0:22],  # 身体关节，红色 [0:22]
+    #                joints[22:25],  # 脸部关节，蓝色 [22:25]
+    #                joints[25:55],  # 手部关节，绿色 [25:55]
+    #                joints[55:]]  # 额外的关键点，黄色 [55:127]
+    smpl_joints = [joints[0:22],  # 身体关节，红色 [0:22]
+                   markers]  # 额外的关键点，黄色 [55:127]
 
-                # 设置球体的位置变换矩阵
-                tfs = np.tile(np.eye(4), (len(current_joints), 1, 1))
-                tfs[:, :3, 3] = current_joints
+    visualize(vertices, faces, smpl_joints)
 
-                # 创建Mesh并添加到场景
-                joints_pcl = pyrender.Mesh.from_trimesh(sm, poses=tfs)
-                scene.add(joints_pcl)
 
-        pyrender.Viewer(scene, use_raymond_lighting=True)
-    elif plotting_module == 'matplotlib':
-        from matplotlib import pyplot as plt
-        from mpl_toolkits.mplot3d import Axes3D
-        from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
-        fig = plt.figure()
-        ax = fig.add_subplot(111, projection='3d')
-
-        mesh = Poly3DCollection(vertices[model.faces], alpha=0.1)
-        face_color = (1.0, 1.0, 0.9)
-        edge_color = (0, 0, 0)
-        mesh.set_edgecolor(edge_color)
-        mesh.set_facecolor(face_color)
-        ax.add_collection3d(mesh)
-        ax.scatter(joints[:, 0], joints[:, 1], joints[:, 2], color='r')
-
-        if plot_joints:
-            ax.scatter(joints[:, 0], joints[:, 1], joints[:, 2], alpha=0.1)
-        plt.show()
-    elif plotting_module == 'open3d':
-        import open3d as o3d
-
-        mesh = o3d.geometry.TriangleMesh()
-        mesh.vertices = o3d.utility.Vector3dVector(
-            vertices)
-        mesh.triangles = o3d.utility.Vector3iVector(model.faces)
-        mesh.compute_vertex_normals()
-        mesh.paint_uniform_color([0.3, 0.3, 0.3])
-
-        geometry = [mesh]
-        if plot_joints:
-            joints_pcl = o3d.geometry.PointCloud()
-            joints_pcl.points = o3d.utility.Vector3dVector(joints)
-            joints_pcl.paint_uniform_color([0.7, 0.3, 0.3])
-            geometry.append(joints_pcl)
-
-        o3d.visualization.draw_geometries(geometry)
-    else:
-        raise ValueError('Unknown plotting_module: {}'.format(plotting_module))
-
+def main():
+    plot_smpl()
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='SMPL-X Demo')
@@ -171,22 +200,4 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
-    model_type = args.model_type
-    plot_joints = args.plot_joints
-    use_face_contour = args.use_face_contour
-    gender = args.gender
-    ext = args.ext
-    plotting_module = args.plotting_module
-    num_betas = args.num_betas
-    num_expression_coeffs = args.num_expression_coeffs
-    sample_shape = args.sample_shape
-    sample_expression = args.sample_expression
-
-    main(model_type, ext=ext,
-         gender=gender, plot_joints=plot_joints,
-         num_betas=num_betas,
-         num_expression_coeffs=num_expression_coeffs,
-         sample_shape=sample_shape,
-         sample_expression=sample_expression,
-         plotting_module=plotting_module,
-         use_face_contour=use_face_contour)
+    main()
