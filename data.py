@@ -1,11 +1,13 @@
 import os.path as osp
-import ezc3d
+# import ezc3d
 from glob import glob
 from torch.utils.data import Dataset, DataLoader
 from marker_vids import all_marker_vids, general_labels_map
 import re
 import numpy as np
 import torch
+from torch.utils.data import Sampler
+import random
 import pandas as pd
 from smpl import Smpl
 import pickle
@@ -96,25 +98,27 @@ class BabelDataset(Dataset):
         with open(path, 'rb') as f:
             self.data = pickle.load(f)
         self.task_id = {}
+        self.samples_per_task = []
         for i, key in enumerate(self.data.keys()):
             self.task_id[i] = key
+            self.samples_per_task.append(self.data[key]['poses'].shape[0])
 
     def __len__(self):
-        return len(self.task_id)
+        return sum(self.samples_per_task)
 
     def __getitem__(self, t):
-        data = {key:value.to(self.device) for key, value in self.data[self.task_id[int(t)]].items()}
+        task_idx, sample_idx = t
+        data = {key:value[sample_idx].to(self.device) for key, value in self.data[self.task_id[int(task_idx)]].items()}
         return data
 
-
-import torch
-from torch.utils.data import Sampler
-import random
-
-
 class MocapTaskBatchSampler(Sampler):
-    def __init__(self, task_dataset, task_batch_size=4, support_size=10, query_size=10, shuffle=True):
+    def __init__(self, task_dataset, task_batch_size=4, support_ratio=0.5, query_ratio=0.5, shuffle=True):
         """
+        对babeldataset的采样，因为babeldataset中的getitem(ind)函数中，我把ind设置为一个tuple(task_id, sample_id),
+        从而能够从某个任务中提取几个样本。
+        那这个sampler的要实现的功能就是：
+        1、支持meta learning的训练模式数据分发，返回数据为[num_tasks, num_seq, dim_features]。
+        2、按比例随机划分supp/qry set。
         Args:
             task_dataset: list of tasks, each task is a list of sequence indices
             task_batch_size: number of tasks per outer loop
@@ -125,8 +129,8 @@ class MocapTaskBatchSampler(Sampler):
         self.task_dataset = task_dataset
         self.num_tasks = len(task_dataset)
         self.task_batch_size = task_batch_size
-        self.support_size = support_size
-        self.query_size = query_size
+        self.support_ratio = support_ratio
+        self.query_ratio = query_ratio
         self.shuffle = shuffle
 
     def __iter__(self):
@@ -192,7 +196,6 @@ class AmassDataset(Dataset):
     def __len__(self):
         return len(self.sequence_labels)
 
-    def __getitem__(self, idx):
         sequence_path = self.sequence_paths[idx]
         data = np.load(sequence_path, allow_pickle=True)
         betas = torch.from_numpy(data['betas'][0:10]).float()
