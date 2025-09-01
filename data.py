@@ -6,7 +6,6 @@ from marker_vids import all_marker_vids, general_labels_map
 import re
 import numpy as np
 import torch
-from torch.utils.data import Sampler
 import random
 import pandas as pd
 from smpl import Smpl
@@ -101,82 +100,45 @@ class BabelDataset(Dataset):
         self.samples_per_task = []
         for i, key in enumerate(self.data.keys()):
             self.task_id[i] = key
-            self.samples_per_task.append(self.data[key]['poses'].shape[0])
+            
 
     def __len__(self):
-        return sum(self.samples_per_task)
+        return len(self.task_id)
 
     def __getitem__(self, t):
-        task_idx, sample_idx = t
-        data = {key:value[sample_idx].to(self.device) for key, value in self.data[self.task_id[int(task_idx)]].items()}
+        data = self.data[self.task_id[int(t)]]
         return data
 
-class MocapTaskBatchSampler(Sampler):
-    def __init__(self, task_dataset, task_batch_size=4, support_ratio=0.5, query_ratio=0.5, shuffle=True):
-        """
-        对babeldataset的采样，因为babeldataset中的getitem(ind)函数中，我把ind设置为一个tuple(task_id, sample_id),
-        从而能够从某个任务中提取几个样本。
-        那这个sampler的要实现的功能就是：
-        1、支持meta learning的训练模式数据分发，返回数据为[num_tasks, num_seq, dim_features]。
-        2、按比例随机划分supp/qry set。
-        Args:
-            task_dataset: list of tasks, each task is a list of sequence indices
-            task_batch_size: number of tasks per outer loop
-            support_size: number of sequences for inner loop (support set)
-            query_size: number of sequences for outer loop (query set)
-            shuffle: whether to shuffle tasks and sequences each iteration
-        """
-        self.task_dataset = task_dataset
-        self.num_tasks = len(task_dataset)
-        self.task_batch_size = task_batch_size
+class MetaCollate:
+    def __init__(self, support_ratio=0.5):
         self.support_ratio = support_ratio
-        self.query_ratio = query_ratio
-        self.shuffle = shuffle
 
-    def __iter__(self):
-        # Shuffle tasks order
-        task_indices = list(range(self.num_tasks))
-        if self.shuffle:
-            random.shuffle(task_indices)
+    def __call__(self, data_list):
+        
+        support_sets = {}
+        query_sets = {}
+        for key in data_list[0].keys():
+            support_sets[key] = []
+            query_sets[key] = []
 
-        batch_tasks = []
-        for t_idx in task_indices:
-            task_sequences = list(range(len(self.task_dataset[t_idx])))
-            if self.shuffle:
-                random.shuffle(task_sequences)
+        for item in data_list:
+            n = item['poses'].shape[0]
+            indices = list(range(n))
+            random.shuffle(indices)
 
-            # Randomly split support/query
-            support_idx = task_sequences[:self.support_size]
-            query_idx = task_sequences[self.support_size:self.support_size + self.query_size]
+            split = int(n * self.support_ratio)  # 60% support
+            support_idx = indices[:split]
+            query_idx = indices[split:]
 
-            batch_tasks.append((t_idx, support_idx, query_idx))
+            # 构建 support / query set
+            for key in item.keys():
+                support_sets[key].append(item[key][support_idx])
+                query_sets[key].append(item[key][query_idx])
+        
+        supp_ret = {key:torch.stack(value) for key, value in support_sets.items()}
+        query_ret = {key:torch.stack(value) for key, value in query_sets.items()}
 
-            # Yield meta-batch
-            if len(batch_tasks) == self.task_batch_size:
-                yield batch_tasks
-                batch_tasks = []
-
-        # Yield remaining tasks if any
-        if len(batch_tasks) > 0:
-            yield batch_tasks
-
-    def __len__(self):
-        # Number of meta-batches per epoch
-        return (self.num_tasks + self.task_batch_size - 1) // self.task_batch_size
-
-    @staticmethod
-    def collate_fn(item_list):
-        # item_list: batch_tasks
-        batch = []
-        for t_idx, support_idx, query_idx in item_list:
-            # Retrieve sequences from original dataset
-            sequences = self.task_dataset[t_idx]
-            support_seqs = [sequences[i] for i in support_idx]
-            query_seqs = [sequences[i] for i in query_idx]
-            batch.append({'task_idx': t_idx,
-                          'support': torch.stack(support_seqs, dim=0),
-                          'query': torch.stack(query_seqs, dim=0)})
-        return batch
+        return supp_ret, query_ret
 
 
 class AmassDataset(Dataset):
@@ -227,24 +189,6 @@ class CMUDataset(Dataset):
     def __getitem__(self, item):
         return self.data[item]
 
-class MyCollator:
-    def __init__(self, num_frame):
-        self.num_frame = num_frame
-
-    def __call__(self, data_list):
-        ret = {}
-        keys = data_list[0].keys()
-
-        for key in keys:
-            if data_list[0][key].dim()==1:
-                values = [item[key].expand([self.num_frame, -1]) for item in data_list]
-            else:
-                len_list = [item[key].shape[0] for item in data_list]
-                si_list = [torch.randint(0, l-self.num_frame, (1,)) for l in len_list]
-                values = [item[key][si:si+self.num_frame] for si, item in zip(si_list, data_list)]
-            values = torch.concatenate(values)
-            ret[key] = values
-        return ret
 
 def generate_marker_data(fp, vid):
     n_marker = len(vid)

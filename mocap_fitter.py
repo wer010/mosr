@@ -5,7 +5,7 @@ import numpy as np
 import argparse
 from glob import glob
 import os.path as osp
-from data import BabelDataset, MyCollator, virtual_marker
+from data import BabelDataset, virtual_marker, MetaCollate
 from torch.utils.data import DataLoader, random_split
 from models import Moshpp, SimpleRNN, ResNet
 from metric import MetricsEngine
@@ -75,6 +75,10 @@ def train(model, tasks, writer, metrics_engine, batch_size = 5, device = 'cuda',
     smpl_model = Smpl(model_path='/home/lanhai/restore/dataset/mocap/models/smpl/SMPL_NEUTRAL.npz', device=device)
     model.train()
 
+
+    for t in tasks:
+        print(f'Train on task {t}: {tasks[int(t)]}')
+        train(model, dataset[t], writer, metrics_engine, device = 'cuda')
     optimizer = optim.Adam(model.parameters(), lr=0.0005)
 
     support_set = {key:value[:25] for key, value in tasks.items()}
@@ -105,7 +109,6 @@ def train(model, tasks, writer, metrics_engine, batch_size = 5, device = 'cuda',
             B = len(batch_ind)
             L = support_pose.shape[1]
             x = support_marker_pos[batch_ind].contiguous().view(B, L, -1)
-
 
             output = model(x)
 
@@ -205,18 +208,20 @@ def eval(model, tasks, metrics_engine, device = 'cuda'):
     print(metrics_engine.to_pretty_string(metrics, f"{model.model_name()}-QuerySet"))
     return output, metrics, query_set
 
-def metatrain(model, tasks, writer, device):
+def metatrain(model, dataset, writer, device):
+    collate_fn = MetaCollate()
+    trainloader = DataLoader(dataset, batch_size=3, collate_fn=collate_fn)
     model.train()
-    n_train_iter = tasks.x_train.shape[0] // tasks.batchsz
     meta_opt = optim.Adam(model.parameters(), lr=1e-3)
 
-    for batch_idx in range(n_train_iter):
+    for data in trainloader:
         # Sample a batch of support and query images and labels.
-        x_spt, y_spt, x_qry, y_qry = tasks.next()
+        supp_set, qry_set = data
 
-        task_num, setsz, c_, h, w = x_spt.size()
-        querysz = x_qry.size(1)
+        task_num, supp_num, seq_num, marker_num, _ = supp_set['marker_pos'].shape()
+        qry_num = qry_set['marker_pos'].shape(1)
 
+        input = supp_set['marker_pos'].contiguous()
         n_inner_iter = 5
         inner_opt = torch.optim.SGD(model.parameters(), lr=1e-1)
 
@@ -233,7 +238,7 @@ def metatrain(model, tasks, writer, device):
                 # higher is able to automatically keep copies of
                 # your network's parameters as they are being updated.
                 for _ in range(n_inner_iter):
-                    spt_logits = fnet(x_spt[i])
+                    spt_logits = fnet(input[i])
                     spt_loss = loss_fn(spt_logits, y_spt[i])
                     diffopt.step(spt_loss)
 
@@ -267,7 +272,6 @@ def metatrain(model, tasks, writer, device):
             'acc': qry_accs,
             'mode': 'train',
         })
-
 
 def metatest(net, db, writer, metrics_engine, device):
     # Crucially in our testing procedure here, we do *not* fine-tune
@@ -327,9 +331,7 @@ def main(config):
     # load data
     device = 'cuda'
     n_marker = len(vid)
-    pos_offset = torch.tensor([0.0095, 0, 0, 1]).expand([n_marker, -1])
-    ori_offset = torch.eye(3).expand([n_marker, -1, -1])
-    vid_tensor = torch.tensor(vid)
+
     dataset = BabelDataset('/home/lanhai/restore/dataset/mocap/mosr/meta_train_data_with_marker.pkl', device = device)
     tasks = dataset.task_id
     num_tasks = len(dataset)
@@ -347,11 +349,11 @@ def main(config):
     os.mkdir(save_dir)
     writer = SummaryWriter(os.path.join(save_dir, 'logs'))
 
-    metatrain(model, dataset, writer, device = 'cuda')
+    train(model, dataset, writer, metrics_engine, device)
 
-    for t in train_tasks:
-        print(f'Train on task {t}: {tasks[int(t)]}')
-        train(model, dataset[t], writer, metrics_engine, device = 'cuda')
+    metatrain(model, dataset, writer, device = device)
+
+
     torch.save(model.state_dict(), osp.join(save_dir,"model.pth"))
     results = []
 
