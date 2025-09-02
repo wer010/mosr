@@ -90,7 +90,8 @@ class MocapSequenceDataset(Dataset):
         }
 
 
-class BabelDataset(Dataset):
+class MetaBabelDataset(Dataset):
+    # Dataset class for meta training, the getitem func return data of a task
     def __init__(self, path, device = 'cuda'):
 
         self.device = device
@@ -108,6 +109,30 @@ class BabelDataset(Dataset):
     def __getitem__(self, t):
         data = self.data[self.task_id[int(t)]]
         return data
+
+
+class BabelDataset(Dataset):
+    def __init__(self, path, device='cuda'):
+        self.device = device
+        with open(path, 'rb') as f:
+            raw_data = pickle.load(f)
+        fv = next(iter(raw_data.values()))
+        all_data = {key:[] for key in fv.keys()}
+
+        for v in raw_data.values():
+            for key, value in v.items():
+                all_data[key].append(value)
+
+        self.data = {k:torch.concatenate(v) for k,v in all_data.items()}
+
+    def __len__(self):
+        return len(next(iter(self.data.values())))
+
+    def __getitem__(self, t):
+        data = {key:value[t] for key, value in self.data.items()}
+        return data
+
+
 
 class MetaCollate:
     def __init__(self, support_ratio=0.5):
@@ -378,4 +403,30 @@ def virtual_marker(betas,
 if __name__ == '__main__':
     pass
     # convert_dataset()
-    generate_marker_data('/home/lanhai/restore/dataset/mocap/mosr/meta_val_data.pkl', vid)
+    # generate_marker_data('/home/lanhai/restore/dataset/mocap/mosr/meta_val_data.pkl', vid)
+
+    with open('/home/lanhai/restore/dataset/mocap/mosr/meta_train_data_with_marker.pkl', 'rb') as f:
+        raw_train_data = pickle.load(f)
+    with open('/home/lanhai/restore/dataset/mocap/mosr/meta_val_data_with_marker.pkl', 'rb') as f:
+        raw_val_data = pickle.load(f)
+
+    merge_data = {}
+    for key, value in raw_train_data.items():
+        cache = {}
+        for k,v in value.items():
+            cache[k] = torch.concatenate([raw_train_data[key][k], raw_val_data[key][k][0:10]])
+        merge_data[key] = cache
+
+    keys = list(merge_data.keys())
+    first27_keys = keys[:27]
+    last3_keys = keys[27:]
+
+    A_first27 = {k: merge_data[k] for k in first27_keys}
+    A_last3 = {k: merge_data[k] for k in last3_keys}
+
+    # 保存成 pkl
+    with open("/home/lanhai/restore/dataset/mocap/mosr/metatrain.pkl", "wb") as f:
+        pickle.dump(A_first27, f)
+
+    with open("/home/lanhai/restore/dataset/mocap/mosr/metatest.pkl", "wb") as f:
+        pickle.dump(A_last3, f)

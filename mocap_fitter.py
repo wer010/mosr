@@ -5,7 +5,7 @@ import numpy as np
 import argparse
 from glob import glob
 import os.path as osp
-from data import BabelDataset, virtual_marker, MetaCollate
+from data import BabelDataset, MetaBabelDataset, virtual_marker, MetaCollate
 from torch.utils.data import DataLoader, random_split
 from models import Moshpp, SimpleRNN, ResNet
 from metric import MetricsEngine
@@ -331,10 +331,9 @@ def main(config):
     device = 'cuda'
     n_marker = len(vid)
 
-    train_dataset = BabelDataset('/home/lanhai/restore/dataset/mocap/mosr/meta_train_data_with_marker.pkl', device = device)
-    test_dataset = BabelDataset('/home/lanhai/restore/dataset/mocap/mosr/meta_train_data_with_marker.pkl', device = device)
-    train_tasks = train_dataset.task_id
-    test_tasks = test_dataset.task_id
+    train_dataset = BabelDataset('/home/lanhai/restore/dataset/mocap/mosr/metatrain.pkl', device = device)
+    test_dataset = BabelDataset('/home/lanhai/restore/dataset/mocap/mosr/metatest.pkl', device = device)
+
 
 
     # model = Moshpp(iter_stage1 = 1000, iter_stage2 = 2000)
@@ -352,24 +351,12 @@ def main(config):
 
     metatrain(model, train_dataset, writer, device = device)
 
-
     torch.save(model.state_dict(), osp.join(save_dir,"model.pth"))
-    results = []
 
     # evaluate  
-    for t in test_tasks:
-        print(f'Evaluate on task {t}: {tasks[int(t)]}')
-        output, metrics, label = eval(model, dataset[t], metrics_engine)
-        res = {
-            'output':output,
-            'metrics':metrics,
-            'gt':label
-        }
-        results.append(res)
-        # vis_results(output, metrics)
+    eval(model, test_dataset, metrics_engine, device)
 
-    with open(osp.join(save_dir, 'results.pkl'),'wb') as f:
-        pickle.dump(results,f)
+
     return
 
 
