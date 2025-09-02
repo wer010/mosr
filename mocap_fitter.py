@@ -71,14 +71,13 @@ def loss_fn(output, gt, do_fk = True):
                  'total_loss': total_loss}
     return losses
 
-def train(model, tasks, writer, metrics_engine, batch_size = 5, device = 'cuda', do_fk = True):
+def train(model, dataset, writer, metrics_engine, batch_size = 5, device = 'cuda'):
     smpl_model = Smpl(model_path='/home/lanhai/restore/dataset/mocap/models/smpl/SMPL_NEUTRAL.npz', device=device)
     model.train()
 
+    collate_fn = MetaCollate()
+    trainloader = DataLoader(dataset, batch_size=3, collate_fn=collate_fn)
 
-    for t in tasks:
-        print(f'Train on task {t}: {tasks[int(t)]}')
-        train(model, dataset[t], writer, metrics_engine, device = 'cuda')
     optimizer = optim.Adam(model.parameters(), lr=0.0005)
 
     support_set = {key:value[:25] for key, value in tasks.items()}
@@ -332,12 +331,12 @@ def main(config):
     device = 'cuda'
     n_marker = len(vid)
 
-    dataset = BabelDataset('/home/lanhai/restore/dataset/mocap/mosr/meta_train_data_with_marker.pkl', device = device)
-    tasks = dataset.task_id
-    num_tasks = len(dataset)
+    train_dataset = BabelDataset('/home/lanhai/restore/dataset/mocap/mosr/meta_train_data_with_marker.pkl', device = device)
+    test_dataset = BabelDataset('/home/lanhai/restore/dataset/mocap/mosr/meta_train_data_with_marker.pkl', device = device)
+    train_tasks = train_dataset.task_id
+    test_tasks = test_dataset.task_id
 
-    train_tasks = torch.arange(0, num_tasks*0.9, dtype = int)
-    test_tasks = torch.arange(num_tasks*0.9, num_tasks, dtype = int)
+
     # model = Moshpp(iter_stage1 = 1000, iter_stage2 = 2000)
     model = ResNet(input_size=3*n_marker, betas_size=10, poses_size=24*3, trans_size=3,num_layers=2, hidden_size=256).to(device)
     
@@ -349,9 +348,9 @@ def main(config):
     os.mkdir(save_dir)
     writer = SummaryWriter(os.path.join(save_dir, 'logs'))
 
-    train(model, dataset, writer, metrics_engine, device)
+    train(model, train_dataset, writer, metrics_engine, device)
 
-    metatrain(model, dataset, writer, device = device)
+    metatrain(model, train_dataset, writer, device = device)
 
 
     torch.save(model.state_dict(), osp.join(save_dir,"model.pth"))
