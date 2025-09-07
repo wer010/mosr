@@ -13,6 +13,8 @@ import pickle
 from tqdm import tqdm
 from geo_utils import estimate_lcs_with_faces
 from utils import visualize, visualize_aitviewer
+from collections import defaultdict
+
 mosr_marker_id = {
     'head':335,
     'chest':3073,
@@ -108,6 +110,7 @@ class MetaBabelDataset(Dataset):
 
     def __getitem__(self, t):
         data = self.data[self.task_id[int(t)]]
+        data['task_name'] = self.task_id[int(t)]
         return data
 
 
@@ -135,21 +138,21 @@ class BabelDataset(Dataset):
 
 
 class MetaCollate:
-    def __init__(self, support_ratio=0.5):
+    def __init__(self, support_ratio=0.5, shuffle = False):
         self.support_ratio = support_ratio
+        self.shuffle = shuffle
 
     def __call__(self, data_list):
         
-        support_sets = {}
-        query_sets = {}
-        for key in data_list[0].keys():
-            support_sets[key] = []
-            query_sets[key] = []
+
+        support_sets = defaultdict(list)
+        query_sets = defaultdict(list)
 
         for item in data_list:
             n = item['poses'].shape[0]
             indices = list(range(n))
-            random.shuffle(indices)
+            if self.shuffle:
+                random.shuffle(indices)
 
             split = int(n * self.support_ratio)  # 60% support
             support_idx = indices[:split]
@@ -157,13 +160,23 @@ class MetaCollate:
 
             # 构建 support / query set
             for key in item.keys():
-                support_sets[key].append(item[key][support_idx])
-                query_sets[key].append(item[key][query_idx])
-        
-        supp_ret = {key:torch.stack(value) for key, value in support_sets.items()}
-        query_ret = {key:torch.stack(value) for key, value in query_sets.items()}
+                if key == 'task_name':
+                    support_sets[key].append(item[key])
+                    query_sets[key].append(item[key])
+                else:
+                    support_sets[key].append(item[key][support_idx])
+                    query_sets[key].append(item[key][query_idx])
+        supp_ret = {}
+        qry_ret = {}
+        for key in support_sets.keys():
+            if key != 'task_name':
+                supp_ret[key] = torch.stack(support_sets[key])
+                qry_ret[key] = torch.stack(query_sets[key])
+            else:
+                supp_ret[key] = support_sets[key]
+                qry_ret[key] = query_sets[key]
 
-        return supp_ret, query_ret
+        return supp_ret, qry_ret
 
 
 class AmassDataset(Dataset):

@@ -139,7 +139,7 @@ class MetricsEngine(object):
         angle_std_all = torch.std(angle_diffs)
 
         metrics = {'Betas error': betas_diffs,
-                   'MPJPE raw': eucl_dists,
+                   # 'MPJPE raw': eucl_dists,
                    'MPJPE [mm]': eucl_mean_all * 1000.0,
                    'MPJPE STD': eucl_std_all * 1000.0,
                    'PA-MPJPE [mm]': eucl_mean_pa_all * 1000.0,

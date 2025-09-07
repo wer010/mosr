@@ -45,21 +45,26 @@ moshpp_marker_id = {'ARIEL': 411, 'C7': 3470, 'CLAV': 3171, 'LANK': 3327, 'LBHD'
 
 vid = [value for value in moshpp_marker_id.values()]
 
-def loss_fn(output, gt, do_fk = True):
+def loss_fn(output, gt, smpl_model=None, do_fk = True):
+    B = output['poses'].shape[0]
+    L = output['poses'].shape[1]
+    device = output['poses'].device
+
     mse_loss = torch.nn.MSELoss()
     l1_loss = torch.nn.L1Loss()
     pose_loss = mse_loss(output['poses'], gt['poses'])
-    shape_loss = l1_loss(output['betas'], gt['betas'])
+    shape_loss = l1_loss(output['betas'].view(B,-1), gt['betas'])
     tran_loss = mse_loss(output['trans'], gt['trans'])
+
 
     if do_fk:
         joints_hat = smpl_model(
-            betas=output['betas'].expand(-1, L, -1).reshape(batch_size * L, -1),
-            body_pose=output['poses'].reshape(batch_size * L, -1)[:, 3:],
-            global_orient=output['poses'].reshape(batch_size * L, -1)[:, 0:3],
-            transl=output['trans'].reshape(batch_size * L, -1)
-        )['joints'].reshape(batch_size, L, -1, 3)
-        fk_loss = mse_loss(joints_hat, support_joints[batch_ind])
+            betas=output['betas'].expand(-1, L, -1).reshape(B * L, -1),
+            body_pose=output['poses'].reshape(B * L, -1)[:, 3:],
+            global_orient=output['poses'].reshape(B * L, -1)[:, 0:3],
+            transl=output['trans'].reshape(B * L, -1)
+        )['joints'].reshape(B, L, -1, 3)
+        fk_loss = mse_loss(joints_hat, gt['joints'])
     else:
         fk_loss = torch.zeros(1, device=device)
     total_loss = pose_loss + shape_loss + tran_loss + 0.1 * fk_loss
@@ -71,47 +76,35 @@ def loss_fn(output, gt, do_fk = True):
                  'total_loss': total_loss}
     return losses
 
-def train(model, dataset, writer, metrics_engine, batch_size = 5, device = 'cuda'):
+def train(model, save_dir, metrics_engine, batch_size = 5, device = 'cuda'):
+    writer = SummaryWriter(os.path.join(save_dir, 'logs'))
+    # 普通训练
     smpl_model = Smpl(model_path='/home/lanhai/restore/dataset/mocap/models/smpl/SMPL_NEUTRAL.npz', device=device)
     model.train()
 
+    train_dataset = BabelDataset('/home/lanhai/restore/dataset/mocap/mosr/metatrain.pkl', device = device)
+    test_dataset = MetaBabelDataset('/home/lanhai/restore/dataset/mocap/mosr/metatest.pkl', device = device)
     collate_fn = MetaCollate()
-    trainloader = DataLoader(dataset, batch_size=3, collate_fn=collate_fn)
 
-    optimizer = optim.Adam(model.parameters(), lr=0.0005)
+    trainloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    testloader = DataLoader(test_dataset, batch_size=1, collate_fn=collate_fn)
+    optimizer = optim.Adam(model.parameters(), lr=5e-4)
 
-    support_set = {key:value[:25] for key, value in tasks.items()}
-    query_set = {key:value[25:] for key, value in tasks.items()}
-
-    support_betas = support_set['betas']
-    support_pose = support_set['poses']
-    support_trans = support_set['trans']
-    support_joints = support_set['joints']
-    support_marker_pos = support_set['marker_pos']
-    support_marker_ori = support_set['marker_ori']
-    query_betas = query_set['betas']
-    query_pose = query_set['poses']
-    query_trans = query_set['trans']
-    query_marker_pos = query_set['marker_pos']
-    query_marker_ori = query_set['marker_ori']
-
-    data_len = len(support_betas)
     global_step = 0
     print('Begin training.')
     for epoch in tqdm(range(400)):
-        shuffle_ind = torch.randperm(data_len, device=device)  # 随机打乱索引
 
-        for i in range(data_len//batch_size):
+        for data in trainloader:
+            B = data['marker_pos'].shape[0]
+            L = data['marker_pos'].shape[1]
+            x = data['marker_pos'].contiguous().view(B, L, -1)
+
             optimizer.zero_grad()
             global_step+=1
-            batch_ind = shuffle_ind[i * batch_size: (i + 1) * batch_size]
-            B = len(batch_ind)
-            L = support_pose.shape[1]
-            x = support_marker_pos[batch_ind].contiguous().view(B, L, -1)
 
             output = model(x)
 
-            losses = loss_fn(output, support_set)
+            losses = loss_fn(output, data, smpl_model)
             if writer is not None:
                 mode_prefix = 'train'
                 for k in losses:
@@ -122,239 +115,217 @@ def train(model, dataset, writer, metrics_engine, batch_size = 5, device = 'cuda
             optimizer.step()
 
 
-    # evaluate the query set (support set)
-    output_list = []
-    for i in range(len(support_betas)):
-        input = support_marker_pos[i].contiguous().view(1, L, -1)
+        # evaluate the query set (support set)
+        finetune = True
+        for data in testloader:
+            num_tasks = data[0]['marker_pos'].shape[0]
+            for t in range(num_tasks):
+                supp_set = {key: value[t] for key, value in data[0].items()}
+                qry_set = {key: value[t] for key, value in data[1].items()}
+                if finetune:
+                    # print('Begin finetuning')
+                    B = supp_set['marker_pos'].shape[0]
+                    L = supp_set['marker_pos'].shape[1]
 
-        output = model(input)
-        output['joints'] = smpl_model(
-            betas=output['betas'].reshape(-1),
-            body_pose=output['poses'].reshape(L, -1)[:, 3:],
-            global_orient=output['poses'].reshape(L, -1)[:, 0:3],
-            transl=output['trans'].reshape(L, -1)
-        )['joints'].reshape(L, -1, 3)
-        # vis_diff_aitviewer('smpl', gt_full_poses=support_set['poses'][i], gt_betas=support_set['betas'][i], gt_trans=support_set['trans'][i],
-        #                    pred_full_poses=output['poses'].squeeze(), pred_betas=output['betas'].squeeze(),
-        #                    pred_trans=output['trans'].squeeze())
-        output_list.append(output)
-    output = {}
-    for key in output_list[0].keys():
-        output[key] = torch.stack([item[key] for item in output_list])
+                    ft_model = model.clone()
 
-    metrics = metrics_engine.compute(output, support_set)
-    print(metrics_engine.to_pretty_string(metrics, f"{model.model_name()}-SupportSet"))
+                    ft_model.train()
+                    for ft_i in range(B//batch_size):
+                        optimizer.zero_grad()
+                        global_step += 1
+                        x = supp_set['marker_pos'][batch_size*ft_i:(ft_i+1)*batch_size].contiguous().view(batch_size, L, -1)
+                        output = ft_model(x)
+                        gt = {key: value[batch_size*ft_i:(ft_i+1)*batch_size] for key, value in supp_set.items() if key != 'task_name'}
+                        losses = loss_fn(output, gt, smpl_model)
+                        losses['total_loss'].backward()
+                        optimizer.step()
+                else:
+                    ft_model = model
 
-    # evaluate the query set (test set)
-    output_list = []
-    for i in range(len(query_betas)):
-        input = query_marker_pos[i].contiguous().view(1, L, -1)
+                ft_model.eval()
+                B = qry_set['marker_pos'].shape[0]
+                L = qry_set['marker_pos'].shape[1]
 
-        output = model(input)
-        output['joints'] = smpl_model(
-            betas=output['betas'].reshape(-1),
-            body_pose=output['poses'].reshape(L, -1)[:, 3:],
-            global_orient=output['poses'].reshape(L, -1)[:, 0:3],
-            transl=output['trans'].reshape(L, -1)
-        )['joints'].reshape(L, -1, 3)
+                output_list = []
+                for val_i in range(B):
+                    x = qry_set['marker_pos'][val_i].contiguous().view(1, L, -1)
+                    output = ft_model(x)
+                    output['joints'] = smpl_model(
+                        betas=output['betas'].reshape(-1),
+                        body_pose=output['poses'].reshape(L, -1)[:, 3:],
+                        global_orient=output['poses'].reshape(L, -1)[:, 0:3],
+                        transl=output['trans'].reshape(L, -1)
+                    )['joints'].reshape(1, L, -1, 3)
+                    output_list.append(output)
+                # vis_diff_aitviewer('smpl', gt_full_poses=support_set['poses'][i], gt_betas=support_set['betas'][i], gt_trans=support_set['trans'][i],
+                #                    pred_full_poses=output['poses'].squeeze(), pred_betas=output['betas'].squeeze(),
+                #                    pred_trans=output['trans'].squeeze())
+                output = {}
+                for key in output_list[0].keys():
+                    output[key] = torch.concatenate([item[key] for item in output_list])
 
-        output_list.append(output)
-    output = {}
-    for key in output_list[0].keys():
-        output[key] = torch.stack([item[key] for item in output_list])
+                metrics = metrics_engine.compute(output, qry_set)
+                for k in metrics.keys():
+                    prefix = f'{k}/test'
+                    writer.add_scalar(prefix, metrics[k].cpu().item(), global_step)
+                print(metrics_engine.to_pretty_string(metrics, f"Task {supp_set['task_name']}-{model.model_name()}-SupportSet"))
 
-    metrics = metrics_engine.compute(output, query_set)
-    print(metrics_engine.to_pretty_string(metrics, f"{model.model_name()}-QuerySet"))
+    torch.save(model.state_dict(), osp.join(save_dir, "model.pth"))
 
-def eval(model, tasks, metrics_engine, device = 'cuda'):
+def test(model, metrics_engine, model_path = None, device = 'cuda', vis = False):
+    finetune = True
+    test_dataset = MetaBabelDataset('/home/lanhai/restore/dataset/mocap/mosr/metatest.pkl', device=device)
+    collate_fn = MetaCollate()
+    testloader = DataLoader(test_dataset, batch_size=1, collate_fn=collate_fn)
+    optimizer = optim.Adam(model.parameters(), lr=0.0005)
+    if model_path is not None:
+        model.load_state_dict(torch.load(osp.join(model_path, "model.pth"), map_location=device))
+
     smpl_model = Smpl(model_path='/home/lanhai/restore/dataset/mocap/models/smpl/SMPL_NEUTRAL.npz', device=device)
-    n_marker = len(vid)
     model.eval()
 
-    support_set = {key:value[:25] for key, value in tasks.items()}
-    query_set = {key:value[25:] for key, value in tasks.items()}
+    for data in testloader:
+        num_tasks = data[0]['marker_pos'].shape[0]
+        for t in range(num_tasks):
+            supp_set = {key: value[t] for key, value in data[0].items()}
+            qry_set = {key: value[t] for key, value in data[1].items()}
+            if finetune:
+                # print('Begin finetuning')
+                B = supp_set['marker_pos'].shape[0]
+                L = supp_set['marker_pos'].shape[1]
+                ft_model = model.clone()
 
-    support_betas = support_set['betas']
-    support_pose = support_set['poses']
-    support_trans = support_set['trans']
-    support_joints = support_set['joints']
-    support_marker_pos = support_set['marker_pos']
-    support_marker_ori = support_set['marker_ori']
-    query_betas = query_set['betas']
-    query_pose = query_set['poses']
-    query_trans = query_set['trans']
-    query_marker_pos = query_set['marker_pos']
-    query_marker_ori = query_set['marker_ori']
+                ft_model.train()
+                for e in range(5):
+                    for ft_i in range(B // 5):
+                        optimizer.zero_grad()
+                        x = supp_set['marker_pos'][5 * ft_i:(ft_i + 1) * 5].contiguous().view(5, L, -1)
+                        output = ft_model(x)
+                        gt = {key: value[5 * ft_i:(ft_i + 1) * 5] for key, value in supp_set.items() if key != 'task_name'}
+                        losses = loss_fn(output, gt, smpl_model)
+                        losses['total_loss'].backward()
+                        optimizer.step()
+            else:
+                ft_model = model
 
-    # evaluate the query set (test set)
-    output_list = []
-    L = support_pose.shape[1]
-    for i in range(len(query_betas)):
-        input = query_marker_pos[i].contiguous().view(1, L, -1)
-        # visualize_aitviewer('smpl', full_poses=query_pose[i], betas=query_betas[i], trans=query_trans[i], extra_points=[query_marker_pos.detach().cpu().numpy()])
-        output = model(input)
-        output['joints'] = smpl_model(
-            betas=output['betas'].reshape(-1),
-            body_pose=output['poses'].reshape(L, -1)[:, 3:],
-            global_orient=output['poses'].reshape(L, -1)[:, 0:3],
-            transl=output['trans'].reshape(L, -1)
-        )['joints'].reshape(L, -1, 3)
-        output_list.append(output)
-    output = {}
-    for key in output_list[0].keys():
-        output[key] = torch.stack([item[key] for item in output_list])
-    metrics = metrics_engine.compute(output, query_set)
-    print(metrics_engine.to_pretty_string(metrics, f"{model.model_name()}-QuerySet"))
-    return output, metrics, query_set
+            ft_model.eval()
+            B = qry_set['marker_pos'].shape[0]
+            L = qry_set['marker_pos'].shape[1]
 
-def metatrain(model, dataset, writer, device):
-    collate_fn = MetaCollate()
-    trainloader = DataLoader(dataset, batch_size=3, collate_fn=collate_fn)
+            output_list = []
+            for val_i in range(B):
+                x = qry_set['marker_pos'][val_i].contiguous().view(1, L, -1)
+                output = ft_model(x)
+                output['joints'] = smpl_model(
+                    betas=output['betas'].reshape(-1),
+                    body_pose=output['poses'].reshape(L, -1)[:, 3:],
+                    global_orient=output['poses'].reshape(L, -1)[:, 0:3],
+                    transl=output['trans'].reshape(L, -1)
+                )['joints'].reshape(1, L, -1, 3)
+                output_list.append(output)
+                if vis:
+                    vis_diff_aitviewer('smpl', gt_full_poses=qry_set['poses'][val_i], gt_betas=qry_set['betas'][val_i], gt_trans=qry_set['trans'][val_i],
+                                       pred_full_poses=output['poses'].squeeze(), pred_betas=output['betas'].squeeze(),
+                                       pred_trans=output['trans'].squeeze())
+            output = {}
+            for key in output_list[0].keys():
+                output[key] = torch.concatenate([item[key] for item in output_list])
+
+            metrics = metrics_engine.compute(output, qry_set)
+            print(metrics_engine.to_pretty_string(metrics,
+                                                  f"Task {supp_set['task_name']}-{model.model_name()}-SupportSet"))
+
+def metatrain(model, save_dir, metrics_engine, device='cuda'):
+    smpl_model = Smpl(model_path='/home/lanhai/restore/dataset/mocap/models/smpl/SMPL_NEUTRAL.npz', device=device)
+
+    writer = SummaryWriter(os.path.join(save_dir, 'logs'))
+    collate_fn = MetaCollate(shuffle=True)
+    train_dataset = MetaBabelDataset('/home/lanhai/restore/dataset/mocap/mosr/metatrain.pkl', device = device)
+    trainloader = DataLoader(train_dataset, batch_size=3, collate_fn=collate_fn)
     model.train()
-    meta_opt = optim.Adam(model.parameters(), lr=1e-3)
+    meta_opt = optim.Adam(model.parameters(), lr=1e-4)
+    for epoch in tqdm(range(400)):
+        for data in trainloader:
+            task_num = data[0]['marker_pos'].shape[0]
 
-    for data in trainloader:
-        # Sample a batch of support and query images and labels.
-        supp_set, qry_set = data
+            inner_batch_size = 5
+            inner_opt = torch.optim.SGD(model.parameters(), lr=5e-4)
 
-        task_num, supp_num, seq_num, marker_num, _ = supp_set['marker_pos'].shape()
-        qry_num = qry_set['marker_pos'].shape(1)
+            qry_losses = []
+            meta_opt.zero_grad()
+            for t in range(task_num):
+                supp_set = {key: value[t] for key, value in data[0].items()}
+                qry_set = {key: value[t] for key, value in data[1].items()}
+                B = supp_set['marker_pos'].shape[0]
+                L = supp_set['marker_pos'].shape[1]
 
-        input = supp_set['marker_pos'].contiguous()
-        n_inner_iter = 5
-        inner_opt = torch.optim.SGD(model.parameters(), lr=1e-1)
+                with higher.innerloop_ctx(
+                        model, inner_opt, copy_initial_weights=True, track_higher_grads=True
+                ) as (fnet, diffopt):
+                    # Optimize the likelihood of the support set by taking
+                    # gradient steps w.r.t. the model's parameters.
+                    # This adapts the model's meta-parameters to the task.
+                    # higher is able to automatically keep copies of
+                    # your network's parameters as they are being updated.
+                    for inner_i in range(B//inner_batch_size):
+                        x = supp_set['marker_pos'][inner_batch_size*inner_i:(inner_i+1)*inner_batch_size].contiguous().view(inner_batch_size, L, -1)
+                        output = fnet(x)
+                        gt = {key: value[inner_batch_size*inner_i:(inner_i+1)*inner_batch_size] for key, value in supp_set.items() if key != 'task_name'}
+                        spt_loss = loss_fn(output, gt, smpl_model)
+                        diffopt.step(spt_loss['total_loss'])
 
-        qry_losses = []
-        qry_accs = []
-        meta_opt.zero_grad()
-        for i in range(task_num):
-            with higher.innerloop_ctx(
-                    model, inner_opt, copy_initial_weights=True,track_higher_grads=True
-            ) as (fnet, diffopt):
-                # Optimize the likelihood of the support set by taking
-                # gradient steps w.r.t. the model's parameters.
-                # This adapts the model's meta-parameters to the task.
-                # higher is able to automatically keep copies of
-                # your network's parameters as they are being updated.
-                for _ in range(n_inner_iter):
-                    spt_logits = fnet(input[i])
-                    spt_loss = loss_fn(spt_logits, y_spt[i])
-                    diffopt.step(spt_loss)
+                    # The final set of adapted parameters will induce some
+                    # final loss and accuracy on the query dataset.
+                    # These will be used to update the model's meta-parameters.
+                    total_qry_loss = torch.tensor(0.0, device=device)
 
-                # The final set of adapted parameters will induce some
-                # final loss and accuracy on the query dataset.
-                # These will be used to update the model's meta-parameters.
-                qry_logits = fnet(x_qry[i])
-                qry_loss = loss_fn(qry_logits, y_qry[i])
-                qry_losses.append(qry_loss.detach())
-                qry_acc = (qry_logits.argmax(
-                    dim=1) == y_qry[i]).sum().item() / querysz
-                qry_accs.append(qry_acc)
+                    for inner_i in range(B//inner_batch_size):
+                        x = qry_set['marker_pos'][inner_batch_size*inner_i:(inner_i+1)*inner_batch_size].contiguous().view(inner_batch_size, L, -1)
+                        output = fnet(x)
+                        gt = {key: value[inner_batch_size*inner_i:(inner_i+1)*inner_batch_size] for key, value in qry_set.items() if key != 'task_name'}
+                        qry_loss = loss_fn(output, gt, smpl_model)
+                        total_qry_loss += qry_loss['total_loss']
+                        qry_losses.append(qry_loss)
+                    total_qry_loss.backward()
 
-                # Update the model's meta-parameters to optimize the query
-                # losses across all of the tasks sampled in this batch.
-                # This unrolls through the gradient steps.
-                qry_loss.backward()
+            if writer is not None:
+                mode_prefix = 'train'
+                for k in qry_losses[0]:
+                    prefix = '{}/{}'.format(k, mode_prefix)
+                    loss = sum([item[k].cpu().item() for item in qry_losses])/len(qry_losses)
+                    writer.add_scalar(prefix, loss, epoch)
 
-        meta_opt.step()
-        qry_losses = sum(qry_losses) / task_num
-        qry_accs = 100. * sum(qry_accs) / task_num
-        i = epoch + float(batch_idx) / n_train_iter
-        if batch_idx % 4 == 0:
-            print(
-                f'[Epoch {i:.2f}] Train Loss: {qry_losses:.2f} | Acc: {qry_accs:.2f} | Time: {iter_time:.2f}'
-            )
+                    # Update the model's meta-parameters to optimize the query
+                    # losses across all of the tasks sampled in this batch.
+                    # This unrolls through the gradient steps.
 
-        log.append({
-            'epoch': i,
-            'loss': qry_losses,
-            'acc': qry_accs,
-            'mode': 'train',
-        })
-
-def metatest(net, db, writer, metrics_engine, device):
-    # Crucially in our testing procedure here, we do *not* fine-tune
-    # the model during testing for simplicity.
-    # Most research papers using MAML for this task do an extra
-    # stage of fine-tuning here that should be added if you are
-    # adapting this code for research.
-    net.train()
-    n_test_iter = db.x_test.shape[0] // db.batchsz
-
-    qry_losses = []
-    qry_accs = []
-
-    for batch_idx in range(n_test_iter):
-        x_spt, y_spt, x_qry, y_qry = db.next('test')
-
-        task_num, setsz, c_, h, w = x_spt.size()
-        querysz = x_qry.size(1)
-
-        # TODO: Maybe pull this out into a separate module so it
-        # doesn't have to be duplicated between `train` and `test`?
-        n_inner_iter = 5
-        inner_opt = torch.optim.SGD(net.parameters(), lr=1e-1)
-
-        for i in range(task_num):
-            with higher.innerloop_ctx(net, inner_opt, track_higher_grads=False) as (fnet, diffopt):
-                # Optimize the likelihood of the support set by taking
-                # gradient steps w.r.t. the model's parameters.
-                # This adapts the model's meta-parameters to the task.
-                for _ in range(n_inner_iter):
-                    spt_logits = fnet(x_spt[i])
-                    spt_loss = F.cross_entropy(spt_logits, y_spt[i])
-                    diffopt.step(spt_loss)
-
-                # The query loss and acc induced by these parameters.
-                qry_logits = fnet(x_qry[i]).detach()
-                qry_loss = F.cross_entropy(
-                    qry_logits, y_qry[i], reduction='none')
-                qry_losses.append(qry_loss.detach())
-                qry_accs.append(
-                    (qry_logits.argmax(dim=1) == y_qry[i]).detach())
-
-    qry_losses = torch.cat(qry_losses).mean().item()
-    qry_accs = 100. * torch.cat(qry_accs).float().mean().item()
-    print(
-        f'[Epoch {epoch + 1:.2f}] Test Loss: {qry_losses:.2f} | Acc: {qry_accs:.2f}'
-    )
-    log.append({
-        'epoch': epoch + 1,
-        'loss': qry_losses,
-        'acc': qry_accs,
-        'mode': 'test',
-        'time': time.time(),
-    })
+            meta_opt.step()
+            
+    torch.save(model.state_dict(), osp.join(save_dir, "model.pth"))
 
 def main(config):
     # load data
     device = 'cuda'
     n_marker = len(vid)
 
-    train_dataset = BabelDataset('/home/lanhai/restore/dataset/mocap/mosr/metatrain.pkl', device = device)
-    test_dataset = BabelDataset('/home/lanhai/restore/dataset/mocap/mosr/metatest.pkl', device = device)
-
-
-
-    # model = Moshpp(iter_stage1 = 1000, iter_stage2 = 2000)
-    model = ResNet(input_size=3*n_marker, betas_size=10, poses_size=24*3, trans_size=3,num_layers=2, hidden_size=256).to(device)
-    
-    metrics_engine = MetricsEngine()
-
-
-    # train
     save_dir = osp.join('./results', datetime.now().strftime('%Y%m%d-%H%M'))
     os.mkdir(save_dir)
-    writer = SummaryWriter(os.path.join(save_dir, 'logs'))
 
-    train(model, train_dataset, writer, metrics_engine, device)
+    # model = Moshpp(iter_stage1 = 1000, iter_stage2 = 2000)
+    # model = ResNet(input_size=3*n_marker, betas_size=10, poses_size=24*3, trans_size=3,num_layers=2, hidden_size=256).to(device)
+    model = SimpleRNN(input_size=3*n_marker, betas_size=10, poses_size=24*3, trans_size=3, num_layers=2, hidden_size=256).to(device)
 
-    metatrain(model, train_dataset, writer, device = device)
+    metrics_engine = MetricsEngine()
 
-    torch.save(model.state_dict(), osp.join(save_dir,"model.pth"))
+    # train
 
-    # evaluate  
-    eval(model, test_dataset, metrics_engine, device)
+    train(model, save_dir, metrics_engine, device = device)
+
+    # metatrain(model, save_dir, metrics_engine, device)
+
+    # evaluate
+    # save_dir = '/home/lanhai/PycharmProjects/mosr/results/20250905-0846'
+    test(model, metrics_engine, save_dir, device, vis=False)
 
 
     return

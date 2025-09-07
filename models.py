@@ -1,6 +1,7 @@
 import numpy as np
 import torch
 from data import MocapSequenceDataset
+import copy
 import os.path as osp
 from loguru import logger
 from omegaconf import OmegaConf
@@ -339,7 +340,14 @@ class ResNet(torch.nn.Module):
                  hidden_size,
                  m_dropout = 0):
         super(ResNet, self).__init__()
-
+        self._init_args = dict(
+            input_size=input_size,
+            betas_size=betas_size,
+            poses_size=poses_size,
+            trans_size=trans_size,
+            num_layers=num_layers,
+            hidden_size=hidden_size,
+            m_dropout=m_dropout)
         self.input_size = input_size
         self.betas_size = betas_size
         self.poses_size = poses_size
@@ -386,6 +394,16 @@ class ResNet(torch.nn.Module):
                 'betas': shape_hat,
                 'trans':tran_hat}
 
+    def clone(self):
+        # 记录原模型的 device
+        device = next(self.parameters()).device
+
+        # 创建新的同构模型
+        new_model = type(self)(**self._init_args).to(device)
+
+        # 拷贝参数
+        new_model.load_state_dict(copy.deepcopy(self.state_dict()))
+        return new_model
 
 
 class SimpleRNN(torch.nn.Module):
@@ -406,7 +424,16 @@ class SimpleRNN(torch.nn.Module):
         self.trans_size = trans_size
         self.num_layers = num_layers
         self.hidden_size = hidden_size
-
+        self._init_args = dict(
+            input_size=input_size,
+            betas_size=betas_size,
+            poses_size=poses_size,
+            trans_size=trans_size,
+            num_layers=num_layers,
+            hidden_size=hidden_size,
+            m_dropout=m_dropout,
+            m_bidirectional=m_bidirectional
+        )
         self.is_bidirectional = m_bidirectional
         self.num_directions = 2 if m_bidirectional else 1
         self.learn_init_state = True
@@ -487,8 +514,18 @@ class SimpleRNN(torch.nn.Module):
 
         return {'poses': pose_hat,
                 'betas': shape_hat,
-                'trans':tran_hat}
+                'trans': tran_hat}
 
+    def clone(self):
+        # 记录原模型的 device
+        device = next(self.parameters()).device
+
+        # 创建新的同构模型
+        new_model = type(self)(**self._init_args).to(device)
+
+        # 拷贝参数
+        new_model.load_state_dict(copy.deepcopy(self.state_dict()))
+        return new_model
     
 class MAML():
     def __init__(self, model, tasks, inner_lr, meta_lr, K=10, inner_steps=1, tasks_per_meta_batch=1000):
