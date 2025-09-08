@@ -1,2 +1,12 @@
 /aitviewer/data/
 /results/
+
+# Ignore Python cache and IDE files
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.idea/
+.vscode/
+*.pkl
+imgui.ini
