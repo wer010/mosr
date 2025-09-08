@@ -124,27 +124,29 @@ def loss_fn(output, gt, smpl_model=None, do_fk=True):
     return losses
 
 
-def train(model, save_dir, metrics_engine, batch_size=5, device="cuda", epochs=400):
+def train(model, save_dir, metrics_engine, batch_size=5, device="cuda", lr = 5e-4, epochs=400, 
+            data_path="/home/lanhai/restore/dataset/mocap/mosr/", 
+            smpl_model_path="/home/lanhai/restore/dataset/mocap/models/smpl/SMPL_NEUTRAL.npz"):
     writer = SummaryWriter(os.path.join(save_dir, "logs"))
     best_mpjpe = torch.inf
     # 普通训练
     smpl_model = Smpl(
-        model_path="/home/lanhai/restore/dataset/mocap/models/smpl/SMPL_NEUTRAL.npz",
+        model_path=smpl_model_path,
         device=device,
     )
     model.train()
 
     train_dataset = BabelDataset(
-        "/home/lanhai/restore/dataset/mocap/mosr/metatrain.pkl", device=device
+        osp.join(data_path, "metatrain.pkl"), device=device
     )
     test_dataset = MetaBabelDataset(
-        "/home/lanhai/restore/dataset/mocap/mosr/metatest.pkl", device=device
+        osp.join(data_path, "metatest.pkl"), device=device
     )
     collate_fn = MetaCollate()
 
     trainloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     testloader = DataLoader(test_dataset, batch_size=1, collate_fn=collate_fn)
-    optimizer = optim.Adam(model.parameters(), lr=5e-4)
+    optimizer = optim.Adam(model.parameters(), lr=lr)
 
     global_step = 0
     print("Begin training.")
@@ -249,10 +251,12 @@ def train(model, save_dir, metrics_engine, batch_size=5, device="cuda", epochs=4
             torch.save(model.state_dict(), osp.join(save_dir, "model.pth"))
 
 
-def test(model, metrics_engine, model_path=None, device="cuda", vis=False):
+def test(model, metrics_engine, model_path=None, device="cuda", vis=False,
+         data_path="/home/lanhai/restore/dataset/mocap/mosr/",
+         smpl_model_path="/home/lanhai/restore/dataset/mocap/models/smpl/SMPL_NEUTRAL.npz"):
     finetune = True
     test_dataset = MetaBabelDataset(
-        "/home/lanhai/restore/dataset/mocap/mosr/metatest.pkl", device=device
+        osp.join(data_path, "metatest.pkl"), device=device
     )
     collate_fn = MetaCollate()
     testloader = DataLoader(test_dataset, batch_size=1, collate_fn=collate_fn)
@@ -263,7 +267,7 @@ def test(model, metrics_engine, model_path=None, device="cuda", vis=False):
         )
 
     smpl_model = Smpl(
-        model_path="/home/lanhai/restore/dataset/mocap/models/smpl/SMPL_NEUTRAL.npz",
+        model_path=smpl_model_path,
         device=device,
     )
     model.eval()
@@ -347,19 +351,21 @@ def metatrain(
     inner_loop_num=1,
     support_set_ratio=0.5,
     meta_batch_size=5,
-    meta_lr=1e-3,
-    inner_lr=1e-2,
-    epochs=1000
+    meta_lr=1e-4,
+    inner_lr=5e-4,
+    epochs=1000,
+    smpl_model_path="/home/lanhai/restore/dataset/mocap/models/smpl/SMPL_NEUTRAL.npz",
+    data_path="/home/lanhai/restore/dataset/mocap/mosr/"
 ):
     smpl_model = Smpl(
-        model_path="/home/lanhai/restore/dataset/mocap/models/smpl/SMPL_NEUTRAL.npz",
+        model_path=smpl_model_path,
         device=device,
     )
 
     writer = SummaryWriter(os.path.join(save_dir, "logs"))
     collate_fn = MetaCollate(shuffle=True, support_ratio=support_set_ratio)
     train_dataset = MetaBabelDataset(
-        "/home/lanhai/restore/dataset/mocap/mosr/metatrain.pkl", device=device
+        osp.join(data_path, "metatrain.pkl"), device=device
     )
     trainloader = DataLoader(train_dataset, batch_size=tasks_num, collate_fn=collate_fn)
     model.train()
@@ -507,7 +513,9 @@ def main(config):
     # 根据训练模式选择训练方式
     if config.train_mode == "pretrain":
         train(
-            model, save_dir, metrics_engine, batch_size=config.batch_size, device=device, epochs=config.epochs
+            model, save_dir, metrics_engine, batch_size=config.batch_size, device=device, lr=config.inner_lr, epochs=config.epochs,
+            data_path=config.data_path,
+            smpl_model_path=config.smpl_model_path
         )
     elif config.train_mode == "meta":
         # 假设metatrain函数支持这些参数
@@ -522,7 +530,9 @@ def main(config):
             meta_batch_size=config.meta_batch_size,
             meta_lr=config.meta_lr,
             inner_lr=config.inner_lr,
-            epochs=config.epochs
+            epochs=config.epochs,
+            data_path=config.data_path,
+            smpl_model_path=config.smpl_model_path
         )
     else:
         raise ValueError(f"未知的train_mode: {config.train_mode}")
@@ -532,9 +542,13 @@ def main(config):
     # test_dir = "/home/lanhai/PycharmProjects/mosr/results/20250907-1049"
     test_dir = None
     if test_dir is not None:
-        test(model, metrics_engine, test_dir, device, vis=False)
+        test(model, metrics_engine, test_dir, device, vis=False,
+             data_path=config.data_path,
+             smpl_model_path=config.smpl_model_path)
     else:
-        test(model, metrics_engine, save_dir, device, vis=False)
+        test(model, metrics_engine, save_dir, device, vis=False,
+             data_path=config.data_path,
+             smpl_model_path=config.smpl_model_path)
 
     return
 
@@ -544,8 +558,19 @@ if __name__ == "__main__":
     # -----------------------
     # General experiment setup
     # -----------------------
-    # parser.add_argument('--data_path', type=str, default=None,
-    #                     help='Path to dataset.')
+
+    parser.add_argument(
+        "--data_path",
+        type=str,
+        default="/home/lanhai/restore/dataset/mocap/mosr/",
+        help="Path to dataset.",
+    )
+    parser.add_argument(
+        "--smpl_model_path",
+        type=str,
+        default="/home/lanhai/restore/dataset/mocap/models/smpl/SMPL_NEUTRAL.npz",
+        help="Path to smpl model.",
+    )
     parser.add_argument("--seed", type=int, default=42, help="Random generator seed.")
     parser.add_argument(
         "--device", type=str, default="cuda", help="Device to use: cuda or cpu."
@@ -627,16 +652,16 @@ if __name__ == "__main__":
     parser.add_argument(
         "--meta_batch_size",
         type=int,
-        default=4,
+        default=5,
         help="Number of episodes per meta-optimization step.",
     )
     parser.add_argument(
-        "--meta_lr", type=float, default=1e-3, help="Learning rate for meta-optimizer."
+        "--meta_lr", type=float, default=1e-4, help="Learning rate for meta-optimizer."
     )
     parser.add_argument(
         "--inner_lr",
         type=float,
-        default=1e-2,
+        default=5e-4,
         help="Learning rate for inner loop updates.",
     )
 
@@ -702,6 +727,6 @@ if __name__ == "__main__":
         default=0.0,
         help="Marker suppression value.",
     )
-
+    
     config = parser.parse_args()
     main(config)
