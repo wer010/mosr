@@ -69,7 +69,9 @@ class L2LOptimizer(nn.Module):
             )
 
         # LSTM前向传播
-        lstm_out, self.hidden_state = self.lstm(processed.unsqueeze(1), self.hidden_state)
+        # Disable CuDNN for higher-order gradients (meta-learning compatibility)
+        with torch.backends.cudnn.flags(enabled=False):
+            lstm_out, self.hidden_state = self.lstm(processed.unsqueeze(1), self.hidden_state)
 
         # 输出更新量
         update = self.output_layer(lstm_out.squeeze(1))

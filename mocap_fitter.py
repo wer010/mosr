@@ -18,7 +18,7 @@ import torch.optim as optim
 from tensorboardX import SummaryWriter
 import higher
 
-mosr_marker_id = {
+rigidbody_marker_id = {
     "head": 335,
     "chest": 3073,
     "left_arm": 2821,
@@ -125,7 +125,7 @@ def loss_fn(output, gt, smpl_model=None, do_fk=True):
 
 
 def train(model, save_dir, metrics_engine, batch_size=5, device="cuda", lr = 5e-4, epochs=400, 
-            data_path="/home/lanhai/restore/dataset/mocap/mosr/", 
+            data_path=None, 
             smpl_model_path="/home/lanhai/restore/dataset/mocap/models/smpl/SMPL_NEUTRAL.npz"):
     writer = SummaryWriter(os.path.join(save_dir, "logs"))
     best_mpjpe = torch.inf
@@ -153,9 +153,9 @@ def train(model, save_dir, metrics_engine, batch_size=5, device="cuda", lr = 5e-
     for epoch in tqdm(range(epochs)):
 
         for data in trainloader:
-            B = data["marker_pos"].shape[0]
-            L = data["marker_pos"].shape[1]
-            x = data["marker_pos"].contiguous().view(B, L, -1)
+            B = data["marker_info"].shape[0]
+            L = data["marker_info"].shape[1]
+            x = data["marker_info"].contiguous().view(B, L, -1)
 
             optimizer.zero_grad()
             global_step += 1
@@ -177,14 +177,14 @@ def train(model, save_dir, metrics_engine, batch_size=5, device="cuda", lr = 5e-
         mpjpe = torch.tensor(0.0).to(device)
         metrics_tasks = {}
         for data in testloader:
-            num_tasks = data[0]["marker_pos"].shape[0]
+            num_tasks = data[0]["marker_info"].shape[0]
             for t in range(num_tasks):
                 supp_set = {key: value[t] for key, value in data[0].items()}
                 qry_set = {key: value[t] for key, value in data[1].items()}
                 if finetune:
                     # print('Begin finetuning')
-                    B = supp_set["marker_pos"].shape[0]
-                    L = supp_set["marker_pos"].shape[1]
+                    B = supp_set["marker_info"].shape[0]
+                    L = supp_set["marker_info"].shape[1]
 
                     ft_model = model.clone()
 
@@ -193,7 +193,7 @@ def train(model, save_dir, metrics_engine, batch_size=5, device="cuda", lr = 5e-
                         optimizer.zero_grad()
                         global_step += 1
                         x = (
-                            supp_set["marker_pos"][
+                            supp_set["marker_info"][
                                 batch_size * ft_i : (ft_i + 1) * batch_size
                             ]
                             .contiguous()
@@ -212,12 +212,12 @@ def train(model, save_dir, metrics_engine, batch_size=5, device="cuda", lr = 5e-
                     ft_model = model
 
                 ft_model.eval()
-                B = qry_set["marker_pos"].shape[0]
-                L = qry_set["marker_pos"].shape[1]
+                B = qry_set["marker_info"].shape[0]
+                L = qry_set["marker_info"].shape[1]
 
                 output_list = []
                 for val_i in range(B):
-                    x = qry_set["marker_pos"][val_i].contiguous().view(1, L, -1)
+                    x = qry_set["marker_info"][val_i].contiguous().view(1, L, -1)
                     output = ft_model(x)
                     output["joints"] = smpl_model(
                         betas=output["betas"].reshape(-1),
@@ -252,15 +252,13 @@ def train(model, save_dir, metrics_engine, batch_size=5, device="cuda", lr = 5e-
 
 
 def test(model, metrics_engine, model_path=None, device="cuda", vis=False,
-         data_path="/home/lanhai/restore/dataset/mocap/mosr/",
-         smpl_model_path="/home/lanhai/restore/dataset/mocap/models/smpl/SMPL_NEUTRAL.npz"):
-    finetune = True
+         data_path=None,
+         smpl_model_path="/home/lanhai/restore/dataset/mocap/models/smpl/SMPL_NEUTRAL.npz", epochs_ft=1):
     test_dataset = MetaBabelDataset(
         osp.join(data_path, "metatest.pkl"), device=device
     )
     collate_fn = MetaCollate()
     testloader = DataLoader(test_dataset, batch_size=1, collate_fn=collate_fn)
-    optimizer = optim.Adam(model.parameters(), lr=0.0005)
     if model_path is not None:
         model.load_state_dict(
             torch.load(osp.join(model_path, "model.pth"), map_location=device)
@@ -273,44 +271,43 @@ def test(model, metrics_engine, model_path=None, device="cuda", vis=False,
     model.eval()
 
     for data in testloader:
-        num_tasks = data[0]["marker_pos"].shape[0]
+        num_tasks = data[0]["marker_info"].shape[0]
         for t in range(num_tasks):
             supp_set = {key: value[t] for key, value in data[0].items()}
             qry_set = {key: value[t] for key, value in data[1].items()}
-            if finetune:
-                # print('Begin finetuning')
-                B = supp_set["marker_pos"].shape[0]
-                L = supp_set["marker_pos"].shape[1]
-                ft_model = model.clone()
+            # print('Begin finetuning')
+            B = supp_set["marker_info"].shape[0]
+            L = supp_set["marker_info"].shape[1]
+            ft_model = model.clone()
+            optimizer = optim.Adam(ft_model.parameters(), lr=1e-5)
 
-                ft_model.train()
-                for e in range(5):
-                    for ft_i in range(B // 5):
-                        optimizer.zero_grad()
-                        x = (
-                            supp_set["marker_pos"][5 * ft_i : (ft_i + 1) * 5]
-                            .contiguous()
-                            .view(5, L, -1)
-                        )
-                        output = ft_model(x)
-                        gt = {
-                            key: value[5 * ft_i : (ft_i + 1) * 5]
-                            for key, value in supp_set.items()
-                            if key != "task_name"
-                        }
-                        losses = loss_fn(output, gt, smpl_model)
-                        losses["total_loss"].backward()
-                        optimizer.step()
-            else:
-                ft_model = model
+            ft_model.train()
+            for e in range(epochs_ft):
+                for ft_i in range(B // 5):
+                    optimizer.zero_grad()
+                    x = (
+                        supp_set["marker_info"][5 * ft_i : (ft_i + 1) * 5]
+                        .contiguous()
+                        .view(5, L, -1)
+                    )
+                    output = ft_model(x)
+                    gt = {
+                        key: value[5 * ft_i : (ft_i + 1) * 5]
+                        for key, value in supp_set.items()
+                        if key != "task_name"
+                    }
+                    losses = loss_fn(output, gt, smpl_model)
+                    losses["total_loss"].backward()
+                    optimizer.step()
+
 
             ft_model.eval()
-            B = qry_set["marker_pos"].shape[0]
-            L = qry_set["marker_pos"].shape[1]
+            B = qry_set["marker_info"].shape[0]
+            L = qry_set["marker_info"].shape[1]
 
             output_list = []
             for val_i in range(B):
-                x = qry_set["marker_pos"][val_i].contiguous().view(1, L, -1)
+                x = qry_set["marker_info"][val_i].contiguous().view(1, L, -1)
                 output = ft_model(x)
                 output["joints"] = smpl_model(
                     betas=output["betas"].reshape(-1),
@@ -347,7 +344,7 @@ def metatrain(
     save_dir,
     metrics_engine,
     device="cuda",
-    tasks_num=3,
+    tasks_num=1,
     inner_loop_num=1,
     support_set_ratio=0.5,
     meta_batch_size=5,
@@ -355,7 +352,7 @@ def metatrain(
     inner_lr=5e-4,
     epochs=1000,
     smpl_model_path="/home/lanhai/restore/dataset/mocap/models/smpl/SMPL_NEUTRAL.npz",
-    data_path="/home/lanhai/restore/dataset/mocap/mosr/"
+    data_path=None
 ):
     smpl_model = Smpl(
         model_path=smpl_model_path,
@@ -370,9 +367,9 @@ def metatrain(
     trainloader = DataLoader(train_dataset, batch_size=tasks_num, collate_fn=collate_fn)
     model.train()
     meta_opt = optim.Adam(model.parameters(), lr=meta_lr)
-    for epoch in tqdm(range(400)):
+    for epoch in tqdm(range(epochs)):
         for data in trainloader:
-            task_num = data[0]["marker_pos"].shape[0]
+            task_num = data[0]["marker_info"].shape[0]
 
             inner_batch_size = meta_batch_size
             inner_opt = torch.optim.SGD(model.parameters(), lr=inner_lr)
@@ -382,11 +379,11 @@ def metatrain(
             for t in range(task_num):
                 supp_set = {key: value[t] for key, value in data[0].items()}
                 qry_set = {key: value[t] for key, value in data[1].items()}
-                B = supp_set["marker_pos"].shape[0]
-                L = supp_set["marker_pos"].shape[1]
+                B = supp_set["marker_info"].shape[0]
+                L = supp_set["marker_info"].shape[1]
 
                 with higher.innerloop_ctx(
-                    model, inner_opt, copy_initial_weights=True, track_higher_grads=True
+                    model, inner_opt, copy_initial_weights=True, track_higher_grads=False
                 ) as (fnet, diffopt):
                     # Optimize the likelihood of the support set by taking
                     # gradient steps w.r.t. the model's parameters.
@@ -396,7 +393,7 @@ def metatrain(
                     for inner_l in range(inner_loop_num):
                         for inner_i in range(B // inner_batch_size):
                             x = (
-                                supp_set["marker_pos"][
+                                supp_set["marker_info"][
                                     inner_batch_size
                                     * inner_i : (inner_i + 1)
                                     * inner_batch_size
@@ -424,7 +421,7 @@ def metatrain(
 
                     for inner_i in range(B // inner_batch_size):
                         x = (
-                            qry_set["marker_pos"][
+                            qry_set["marker_info"][
                                 inner_batch_size
                                 * inner_i : (inner_i + 1)
                                 * inner_batch_size
@@ -471,22 +468,26 @@ def main(config):
     marker_type = config.marker_type if hasattr(config, "marker_type") else "moshpp"
     if marker_type == "moshpp":
         vid = [value for value in moshpp_marker_id.values()]
-    elif marker_type == "mosr":
-        vid = [value for value in mosr_marker_id.values()]
+        config.data_path = osp.join(config.data_path, "moshpp")
+        input_dim = 3
+    elif marker_type == "rbm":
+        vid = [value for value in rigidbody_marker_id.values()]
+        config.data_path = osp.join(config.data_path, "rbm")
+        input_dim = 6
     else:
         raise ValueError(f"未知的marker_type: {marker_type}")
 
     n_marker = len(vid)
 
+
     # 保存目录
-    save_dir = osp.join("./results", datetime.now().strftime("%Y%m%d-%H%M"))
-    if not osp.exists(save_dir):
-        os.mkdir(save_dir)
+    save_dir = osp.join("./results", f'{datetime.now().strftime("%Y%m%d-%H%M")}-{config.base_model}-{config.train_mode}-{config.marker_type}-{config.epochs}epochs')
+
 
     # 根据配置选择模型
     if config.base_model == "rnn":
         model = SimpleRNN(
-            input_size=3 * n_marker,
+            input_size=input_dim * n_marker,
             betas_size=10,
             poses_size=24 * 3,
             trans_size=3,
@@ -497,7 +498,7 @@ def main(config):
         ).to(device)
     elif config.base_model == "resnet":
         model = ResNet(
-            input_size=3 * n_marker,
+            input_size=input_dim * n_marker,
             betas_size=10,
             poses_size=24 * 3,
             trans_size=3,
@@ -512,6 +513,9 @@ def main(config):
 
     # 根据训练模式选择训练方式
     if config.train_mode == "pretrain":
+        # 保存目录
+        if not osp.exists(save_dir):
+            os.mkdir(save_dir)
         train(
             model, save_dir, metrics_engine, batch_size=config.batch_size, device=device, lr=config.inner_lr, epochs=config.epochs,
             data_path=config.data_path,
@@ -519,6 +523,9 @@ def main(config):
         )
     elif config.train_mode == "meta":
         # 假设metatrain函数支持这些参数
+        # 保存目录
+        if not osp.exists(save_dir):
+            os.mkdir(save_dir)
         metatrain(
             model,
             save_dir,
@@ -534,21 +541,24 @@ def main(config):
             data_path=config.data_path,
             smpl_model_path=config.smpl_model_path
         )
+    elif config.train_mode == "test":
+        test_dir = config.model_path
     else:
         raise ValueError(f"未知的train_mode: {config.train_mode}")
 
     # 测试模型
     # 如果有指定测试目录则用，否则用当前save_dir
     # test_dir = "/home/lanhai/PycharmProjects/mosr/results/20250907-1049"
-    test_dir = None
     if test_dir is not None:
         test(model, metrics_engine, test_dir, device, vis=False,
              data_path=config.data_path,
-             smpl_model_path=config.smpl_model_path)
+             smpl_model_path=config.smpl_model_path,
+             epochs_ft=config.epochs_ft)
     else:
         test(model, metrics_engine, save_dir, device, vis=False,
              data_path=config.data_path,
-             smpl_model_path=config.smpl_model_path)
+             smpl_model_path=config.smpl_model_path,
+             epochs_ft=config.epochs_ft)
 
     return
 
@@ -571,6 +581,12 @@ if __name__ == "__main__":
         default="/home/lanhai/restore/dataset/mocap/models/smpl/SMPL_NEUTRAL.npz",
         help="Path to smpl model.",
     )
+    parser.add_argument(
+        "--model_path",
+        type=str,
+        default=None,
+        help="Path to trained model.",
+    )
     parser.add_argument("--seed", type=int, default=42, help="Random generator seed.")
     parser.add_argument(
         "--device", type=str, default="cuda", help="Device to use: cuda or cpu."
@@ -583,7 +599,7 @@ if __name__ == "__main__":
         "--train_mode",
         type=str,
         default="pretrain",
-        choices=["pretrain", "meta"],
+        choices=["pretrain", "meta", "test"],
         help="Training mode: pretrain (standard) or meta (meta-learning).",
     )
 
@@ -615,6 +631,9 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--batch_size", type=int, default=5, help="Batch size for pretraining."
+    )
+    parser.add_argument(
+        "--epochs_ft", type=int, default=1, help="Number of epochs for finetuning."
     )
     parser.add_argument("--lr", type=float, default=5e-4, help="Initial learning rate.")
     parser.add_argument(
@@ -670,20 +689,10 @@ if __name__ == "__main__":
         "--marker_type",
         type=str,
         default="moshpp",
-        choices=["moshpp", "mosr"],
+        choices=["moshpp", "rbm"],
         help="Marker type.",
     )
-    parser.add_argument(
-        "--use_marker_pos", action="store_true", help="Feed marker positions."
-    )
-    parser.add_argument(
-        "--use_marker_ori", action="store_true", help="Feed marker orientations."
-    )
-    parser.add_argument(
-        "--use_marker_nor",
-        action="store_true",
-        help="Feed marker normal instead of orientation.",
-    )
+
     parser.add_argument(
         "--use_real_offsets",
         action="store_true",

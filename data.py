@@ -14,8 +14,8 @@ from tqdm import tqdm
 from geo_utils import estimate_lcs_with_faces
 from utils import visualize, visualize_aitviewer
 from collections import defaultdict
-
-mosr_marker_id = {
+from pytorch3d.transforms import matrix_to_axis_angle
+rigidbody_marker_id = {
     'head':335,
     'chest':3073,
     'left_arm':2821,
@@ -40,7 +40,6 @@ moshpp_marker_id = {'ARIEL': 411, 'C7': 3470, 'CLAV': 3171, 'LANK': 3327, 'LBHD'
                     'RKNI': 4544, 'RMT1': 6736, 'RMT5': 6747, 'ROWR': 5568, 'RSHN': 4568, 'RTHI': 4927, 'RTHMB': 5686,
                     'RTOE': 6633, 'RUPA': 4918, 'STRN': 3506, 'T10': 3016}
 
-vid = [value for value in moshpp_marker_id.values()]
 smpl_marker_id = {
     'head':335,
     'chest':3073,
@@ -110,6 +109,7 @@ class MetaBabelDataset(Dataset):
 
     def __getitem__(self, t):
         data = self.data[self.task_id[int(t)]]
+        data = {key:value.to(self.device) for key, value in data.items()}
         data['task_name'] = self.task_id[int(t)]
         return data
 
@@ -132,7 +132,7 @@ class BabelDataset(Dataset):
         return len(next(iter(self.data.values())))
 
     def __getitem__(self, t):
-        data = {key:value[t] for key, value in self.data.items()}
+        data = {key:value[t].to(self.device) for key, value in self.data.items()}
         return data
 
 
@@ -228,14 +228,18 @@ class CMUDataset(Dataset):
         return self.data[item]
 
 
-def generate_marker_data(fp, vid):
+def generate_marker_data(fp, marker_type = 'rbm'):
+    if marker_type == 'rbm':
+        vid = [value for value in rigidbody_marker_id.values()]
+    elif marker_type == 'moshpp':
+        vid = [value for value in moshpp_marker_id.values()]
+
     n_marker = len(vid)
     device = 'cuda'
     pos_offset = torch.tensor([0.0095, 0, 0, 1]).expand([n_marker, -1]).to(device)
     ori_offset = torch.eye(3).expand([n_marker, -1, -1]).to(device)
     vid_tensor = torch.tensor(vid).to(device)
-    dataset = BabelDataset(fp, device=device)
-    tasks = dataset.task_id
+    dataset = MetaBabelDataset(fp, device=device)
     save_data = {}
     for t in range(len(dataset)):
         print(f'{t}: Generate the marker for {dataset.task_id[int(t)]}')
@@ -259,17 +263,21 @@ def generate_marker_data(fp, vid):
 
         marker_pos = torch.stack(marker_pos_list)
         marker_ori = torch.stack(marker_ori_list)
+        marker_ori = matrix_to_axis_angle(marker_ori)
+        if marker_type == 'rbm':
+            marker_info = torch.cat([marker_pos, marker_ori], dim=-1)
+        else:
+            marker_info = marker_pos
         joints = torch.stack(joints_list)
 
-        ret = {'betas': data['betas'],
-               'poses': data['poses'],
-               'trans': data['trans'],
-               'marker_pos': marker_pos,
-               'marker_ori': marker_ori,
-               'joints': joints}
+        ret = {'betas': data['betas'].detach().cpu(),
+               'poses': data['poses'].detach().cpu(),
+               'trans': data['trans'].detach().cpu(),
+               'marker_info': marker_info.detach().cpu(),
+               'joints': joints.detach().cpu()}
         save_data[dataset.task_id[int(t)]] = ret
 
-    with open(fp.replace('.pkl', '_with_marker.pkl'), 'wb') as f:
+    with open(fp.replace('.pkl', f'_with_{marker_type}_marker.pkl'), 'wb') as f:
         pickle.dump(save_data, f)
 
 def convert_dataset():
@@ -416,11 +424,14 @@ def virtual_marker(betas,
 if __name__ == '__main__':
     pass
     # convert_dataset()
-    # generate_marker_data('/home/lanhai/restore/dataset/mocap/mosr/meta_val_data.pkl', vid)
+    marker_type = 'moshpp'
+    generate_marker_data('/home/lanhai/restore/dataset/mocap/mosr/meta_train_data.pkl', marker_type = marker_type)
 
-    with open('/home/lanhai/restore/dataset/mocap/mosr/meta_train_data_with_marker.pkl', 'rb') as f:
+    generate_marker_data('/home/lanhai/restore/dataset/mocap/mosr/meta_val_data.pkl', marker_type = marker_type)
+
+    with open(f'/home/lanhai/restore/dataset/mocap/mosr/meta_train_data_with_{marker_type}_marker.pkl', 'rb') as f:
         raw_train_data = pickle.load(f)
-    with open('/home/lanhai/restore/dataset/mocap/mosr/meta_val_data_with_marker.pkl', 'rb') as f:
+    with open(f'/home/lanhai/restore/dataset/mocap/mosr/meta_val_data_with_{marker_type}_marker.pkl', 'rb') as f:
         raw_val_data = pickle.load(f)
 
     merge_data = {}
@@ -438,8 +449,8 @@ if __name__ == '__main__':
     A_last3 = {k: merge_data[k] for k in last3_keys}
 
     # 保存成 pkl
-    with open("/home/lanhai/restore/dataset/mocap/mosr/metatrain.pkl", "wb") as f:
+    with open(f"/home/lanhai/restore/dataset/mocap/mosr/{marker_type}/metatrain.pkl", "wb") as f:
         pickle.dump(A_first27, f)
 
-    with open("/home/lanhai/restore/dataset/mocap/mosr/metatest.pkl", "wb") as f:
+    with open(f"/home/lanhai/restore/dataset/mocap/mosr/{marker_type}/metatest.pkl", "wb") as f:
         pickle.dump(A_last3, f)

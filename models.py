@@ -500,6 +500,8 @@ class SimpleRNN(torch.nn.Module):
         self.init_state = self.cell_init(inputs_)
 
         # Feed it to the LSTM.
+        # Disable CuDNN for higher-order gradients (meta-learning compatibility)
+        # with torch.backends.cudnn.flags(enabled=False):
         lstm_out, final_state = self.lstm(inputs_, self.init_state)
         self.final_state = final_state
 
