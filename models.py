@@ -1,13 +1,10 @@
 import numpy as np
 import torch
-from data import MocapSequenceDataset
 import copy
 import os.path as osp
 from loguru import logger
 from omegaconf import OmegaConf
-from typing import OrderedDict
 from smpl import Smpl
-import random
 from geo_utils import estimate_lcs_with_curv, estimate_lcs_with_faces, invert_se3, rigid_landmark_transform_batch
 from pytorch3d.ops.knn import  knn_points
 import torch.nn.functional as F
