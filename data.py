@@ -1,5 +1,4 @@
 import os.path as osp
-import ezc3d
 from glob import glob
 from torch.utils.data import Dataset, DataLoader
 from marker_vids import all_marker_vids, general_labels_map
@@ -56,40 +55,6 @@ smpl_marker_id = {
     'right_shin':4599,
     'right_foot':6742
 }
-
-class MocapSequenceDataset(Dataset):
-    def __init__(self, sequence_dir):
-        self.sequence_paths =  glob(osp.join(sequence_dir, '*/*.c3d'))  # or .pkl/.npz
-        self.sequence_labels = ['_'.join(re.split(r'[/.]',a)[-4:-1]) for a in self.sequence_paths]
-        self.subject_names = [a.split('/')[-2] for a in self.sequence_paths]
-        self.smpl_id_tab  = all_marker_vids['smpl']
-    
-    def __len__(self):
-        return len(self.sequence_paths)
-
-    def __getitem__(self, idx, stagei= True):
-        sequence_path = self.sequence_paths[idx]
-        marker_data = ezc3d.c3d(sequence_path)
-        markers = marker_data['data']['points'][:3].transpose(2, 1, 0)
-        nan_mask = np.isnan(markers).any(axis = (1,2))
-        markers = markers[~nan_mask]
-        frame_rate = marker_data['parameters']['POINT']['RATE']['value'][0]
-        labels = marker_data['parameters']['POINT']['LABELS']['value']
-        labels = [item.split(':')[-1] for item in labels]
-        general_labels = [key for key in general_labels_map]
-        mapped_labels = [general_labels_map[key] if key in general_labels else key for key in labels]
-        smplid = [self.smpl_id_tab[key] for key in mapped_labels]
-
-        return {
-            "sequence_labels": self.sequence_labels[idx],
-            'subject_name': self.subject_names[idx],
-            'markers_pos': markers, 
-            'labels': labels,
-            'id': smplid,
-            'frame_rate': frame_rate, 
-            'marker_data': marker_data
-        }
-
 
 class MetaBabelDataset(Dataset):
     # Dataset class for meta training, the getitem func return data of a task
@@ -213,19 +178,6 @@ class AmassDataset(Dataset):
             'marker_data': marker_data
         }
 
-class CMUDataset(Dataset):
-    def __init__(self,
-                 data_path,
-                 num_frame = 120):
-        with open(data_path, 'rb') as f:
-            self.data = pickle.load(f)
-        self.num_frame = num_frame
-
-    def __len__(self):
-        return len(self.data)
-
-    def __getitem__(self, item):
-        return self.data[item]
 
 
 def generate_marker_data(fp, marker_type = 'rbm'):
