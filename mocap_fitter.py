@@ -147,7 +147,7 @@ def train(model, save_dir, metrics_engine, batch_size=5, device="cuda", lr = 5e-
     trainloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     testloader = DataLoader(test_dataset, batch_size=1, collate_fn=collate_fn)
     optimizer = optim.Adam(model.parameters(), lr=lr)
-
+    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=epochs//10, gamma=0.5)
     global_step = 0
     print("Begin training.")
     for epoch in tqdm(range(epochs)):
@@ -169,8 +169,10 @@ def train(model, save_dir, metrics_engine, batch_size=5, device="cuda", lr = 5e-
                     prefix = "{}/{}".format(k, mode_prefix)
                     writer.add_scalar(prefix, losses[k].cpu().item(), global_step)
 
+            writer.add_scalar("lr", scheduler.get_last_lr()[0], global_step)
             losses["total_loss"].backward()
             optimizer.step()
+            scheduler.step()
 
         # evaluate the query set (support set)
         finetune = True
@@ -521,6 +523,7 @@ def main(config):
             data_path=config.data_path,
             smpl_model_path=config.smpl_model_path
         )
+        test_dir = save_dir
     elif config.train_mode == "meta":
         # 假设metatrain函数支持这些参数
         # 保存目录
@@ -541,24 +544,20 @@ def main(config):
             data_path=config.data_path,
             smpl_model_path=config.smpl_model_path
         )
+        test_dir = save_dir
     elif config.train_mode == "test":
+        assert config.model_path is not None, "model_path is required for test mode"
         test_dir = config.model_path
     else:
         raise ValueError(f"未知的train_mode: {config.train_mode}")
 
     # 测试模型
     # 如果有指定测试目录则用，否则用当前save_dir
-    # test_dir = "/home/lanhai/PycharmProjects/mosr/results/20250907-1049"
-    if test_dir is not None:
-        test(model, metrics_engine, test_dir, device, vis=False,
-             data_path=config.data_path,
-             smpl_model_path=config.smpl_model_path,
-             epochs_ft=config.epochs_ft)
-    else:
-        test(model, metrics_engine, save_dir, device, vis=False,
-             data_path=config.data_path,
-             smpl_model_path=config.smpl_model_path,
-             epochs_ft=config.epochs_ft)
+
+    test(model, metrics_engine, test_dir, device, vis=False,
+            data_path=config.data_path,
+            smpl_model_path=config.smpl_model_path,
+            epochs_ft=config.epochs_ft)
 
     return
 

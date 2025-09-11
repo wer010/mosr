@@ -1,5 +1,5 @@
 import os.path as osp
-# import ezc3d
+import ezc3d
 from glob import glob
 from torch.utils.data import Dataset, DataLoader
 from marker_vids import all_marker_vids, general_labels_map
