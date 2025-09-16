@@ -7,7 +7,7 @@ from glob import glob
 import os.path as osp
 from data import BabelDataset, MetaBabelDataset, virtual_marker, MetaCollate
 from torch.utils.data import DataLoader, random_split
-from models import Moshpp, SimpleRNN, ResNet
+from models import Moshpp, FrameModel, SequenceModel
 from metric import MetricsEngine
 from smpl import Smpl
 from tqdm import tqdm
@@ -17,6 +17,7 @@ from utils import visualize_aitviewer, vis_diff_aitviewer
 import torch.optim as optim
 from tensorboardX import SummaryWriter
 import higher
+from geo_utils import estimate_lcs_with_faces
 
 rigidbody_marker_id = {
     "head": 335,
@@ -27,12 +28,14 @@ rigidbody_marker_id = {
     "left_leg": 981,
     "left_shin": 1115,
     "left_foot": 3341,
+    # "left_hip":809,
     "right_arm": 4794,
     "right_forearm": 5059,
     "right_hand": 5459,
     "right_leg": 4465,
     "right_shin": 4599,
     "right_foot": 6742,
+    # "right_hip":4297
 }
 moshpp_marker_id = {
     "ARIEL": 411,
@@ -90,6 +93,35 @@ moshpp_marker_id = {
     "T10": 3016,
 }
 
+def loss_rec_fn(output, gt, smpl_model=None):
+    pos_offset = 0.0095
+    ori_offset = 0.0095
+    B = output["poses"].shape[0]
+    L = output["poses"].shape[1]
+    device = output["poses"].device
+
+
+    output = smpl_model(betas=output["betas"],
+                     body_pose=output["poses"][:,3:],
+                     global_orient=output["poses"][:,0:3],
+                     transl=output["trans"])
+    v_posed = output['vertices']
+    joints = output['joints']
+
+    lcs = estimate_lcs_with_faces(vid=vid,
+                                  fid=smpl_model.vertex_faces[vid],
+                                  vertices=v_posed,
+                                  faces=model.faces_tensor)
+
+    marker_pos = torch.matmul(lcs, pos_offset[None, ..., None])[:, :, 0:3, 0]
+    marker_ori = torch.matmul(lcs[:, :, 0:3, 0:3], ori_offset)
+
+    mse_loss = torch.nn.MSELoss()
+    l1_loss = torch.nn.L1Loss()
+    pose_loss = mse_loss(output["poses"], gt["poses"])
+    shape_loss = l1_loss(output["betas"].view(B, -1), gt["betas"])
+    tran_loss = mse_loss(output["trans"], gt["trans"])
+    return pose_loss + shape_loss + tran_loss
 
 def loss_fn(output, gt, smpl_model=None, do_fk=True):
     B = output["poses"].shape[0]
@@ -487,8 +519,8 @@ def main(config):
 
 
     # 根据配置选择模型
-    if config.base_model == "rnn":
-        model = SimpleRNN(
+    if config.base_model == "sequence":
+        model = SequenceModel(
             input_size=input_dim * n_marker,
             betas_size=10,
             poses_size=24 * 3,
@@ -496,10 +528,11 @@ def main(config):
             num_layers=config.num_layers,
             hidden_size=config.hidden_size,
             m_dropout=config.dropout if hasattr(config, "dropout") else 0.0,
-            m_bidirectional=True
+            m_bidirectional=True,
+            model_type=config.model_type
         ).to(device)
-    elif config.base_model == "resnet":
-        model = ResNet(
+    elif config.base_model == "frame":
+        model = FrameModel(
             input_size=input_dim * n_marker,
             betas_size=10,
             poses_size=24 * 3,
@@ -554,7 +587,7 @@ def main(config):
     # 测试模型
     # 如果有指定测试目录则用，否则用当前save_dir
 
-    test(model, metrics_engine, test_dir, device, vis=False,
+    test(model, metrics_engine, test_dir, device, vis=True,
             data_path=config.data_path,
             smpl_model_path=config.smpl_model_path,
             epochs_ft=config.epochs_ft)
@@ -608,10 +641,18 @@ if __name__ == "__main__":
     parser.add_argument(
         "--base_model",
         type=str,
-        default="rnn",
-        choices=["rnn", "resnet"],
+        default="sequence",
+        choices=["frame", "sequence"],
         help="Backbone model type.",
     )
+    parser.add_argument(
+        "--model_type",
+        type=str,
+        default="lstm",
+        choices=["rnn", "lstm", "gru"],
+        help="Model type.",
+    )
+
     parser.add_argument(
         "--hidden_size", type=int, default=256, help="Hidden size for RNN/MLP layers."
     )
