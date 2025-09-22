@@ -336,7 +336,7 @@ class FrameModel(torch.nn.Module):
                  num_layers,
                  hidden_size,
                  m_dropout = 0):
-        super(ResNet, self).__init__()
+        super(FrameModel, self).__init__()
         self._init_args = dict(
             input_size=input_size,
             betas_size=betas_size,
