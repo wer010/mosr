@@ -180,7 +180,7 @@ class AmassDataset(Dataset):
 
 
 
-def generate_marker_data(fp, marker_type = 'rbm'):
+def generate_marker_data(fp, marker_type = 'rbm', normalize_flags=[]):
     if marker_type == 'rbm':
         vid = [value for value in rigidbody_marker_id.values()]
     elif marker_type == 'moshpp':
@@ -196,6 +196,9 @@ def generate_marker_data(fp, marker_type = 'rbm'):
     for t in range(len(dataset)):
         print(f'{t}: Generate the marker for {dataset.task_id[int(t)]}')
         data = dataset[t]
+
+        for k in normalize_flags:
+            data[k] = data[k]*0.0
         marker_pos_list = []
         marker_ori_list = []
         joints_list = []
@@ -229,8 +232,14 @@ def generate_marker_data(fp, marker_type = 'rbm'):
                'joints': joints.detach().cpu()}
         save_data[dataset.task_id[int(t)]] = ret
 
-    with open(fp.replace('.pkl', f'_with_{marker_type}_marker.pkl'), 'wb') as f:
+    if len(normalize_flags) > 0:
+        s = '_normalize_'+ '_'.join(str(i) for i in normalize_flags)
+    else:
+        s = ''
+    file_name = fp.replace('.pkl', f'_with_{marker_type}{s}_marker.pkl')
+    with open(file_name, 'wb') as f:
         pickle.dump(save_data, f)
+    return file_name
 
 def convert_dataset():
     df = pd.read_excel('/home/lanhai/PycharmProjects/mosr/cmu_motion.xlsx', header = None)
@@ -376,14 +385,14 @@ def virtual_marker(betas,
 if __name__ == '__main__':
     pass
     # convert_dataset()
-    marker_type = 'moshpp'
-    generate_marker_data('/home/lanhai/restore/dataset/mocap/mosr/meta_train_data.pkl', marker_type = marker_type)
+    marker_type = 'rbm'
+    train_file_name = generate_marker_data('/home/lanhai/restore/dataset/mocap/mosr/meta_train_data.pkl', marker_type = marker_type, normalize_flags=['betas'])
 
-    generate_marker_data('/home/lanhai/restore/dataset/mocap/mosr/meta_val_data.pkl', marker_type = marker_type)
+    val_file_name = generate_marker_data('/home/lanhai/restore/dataset/mocap/mosr/meta_val_data.pkl', marker_type = marker_type, normalize_flags=['betas'])
 
-    with open(f'/home/lanhai/restore/dataset/mocap/mosr/meta_train_data_with_{marker_type}_marker.pkl', 'rb') as f:
+    with open(train_file_name, 'rb') as f:
         raw_train_data = pickle.load(f)
-    with open(f'/home/lanhai/restore/dataset/mocap/mosr/meta_val_data_with_{marker_type}_marker.pkl', 'rb') as f:
+    with open(val_file_name, 'rb') as f:
         raw_val_data = pickle.load(f)
 
     merge_data = {}
@@ -401,8 +410,8 @@ if __name__ == '__main__':
     A_last3 = {k: merge_data[k] for k in last3_keys}
 
     # 保存成 pkl
-    with open(f"/home/lanhai/restore/dataset/mocap/mosr/{marker_type}/metatrain.pkl", "wb") as f:
+    with open(f"/home/lanhai/restore/dataset/mocap/mosr/{marker_type}/{osp.basename(train_file_name)}", "wb") as f:
         pickle.dump(A_first27, f)
 
-    with open(f"/home/lanhai/restore/dataset/mocap/mosr/{marker_type}/metatest.pkl", "wb") as f:
+    with open(f"/home/lanhai/restore/dataset/mocap/mosr/{marker_type}/{osp.basename(val_file_name)}", "wb") as f:
         pickle.dump(A_last3, f)

@@ -169,10 +169,10 @@ def train(model, save_dir, metrics_engine, batch_size=5, device="cuda", lr = 5e-
     model.train()
 
     train_dataset = BabelDataset(
-        osp.join(data_path, "metatrain.pkl"), device=device
+        osp.join(data_path, "meta_train_data_with_rbm_normalize_betas_marker.pkl"), device=device
     )
     test_dataset = MetaBabelDataset(
-        osp.join(data_path, "metatest.pkl"), device=device
+        osp.join(data_path, "meta_val_data_with_rbm_normalize_betas_marker.pkl"), device=device
     )
     collate_fn = MetaCollate()
 
@@ -417,7 +417,7 @@ def metatrain(
                 L = supp_set["marker_info"].shape[1]
 
                 with higher.innerloop_ctx(
-                    model, inner_opt, copy_initial_weights=True, track_higher_grads=False
+                    model, inner_opt, copy_initial_weights=False, track_higher_grads=True
                 ) as (fnet, diffopt):
                     # Optimize the likelihood of the support set by taking
                     # gradient steps w.r.t. the model's parameters.
@@ -587,7 +587,7 @@ def main(config):
     # 测试模型
     # 如果有指定测试目录则用，否则用当前save_dir
 
-    test(model, metrics_engine, test_dir, device, vis=True,
+    test(model, metrics_engine, test_dir, device, vis=False,
             data_path=config.data_path,
             smpl_model_path=config.smpl_model_path,
             epochs_ft=config.epochs_ft)
