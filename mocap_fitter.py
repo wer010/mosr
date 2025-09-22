@@ -3,6 +3,7 @@ import pickle
 import torch
 import numpy as np
 import argparse
+import json
 from glob import glob
 import os.path as osp
 from data import BabelDataset, MetaBabelDataset, virtual_marker, MetaCollate
@@ -178,8 +179,9 @@ def train(model, save_dir, metrics_engine, batch_size=5, device="cuda", lr = 5e-
 
     trainloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     testloader = DataLoader(test_dataset, batch_size=1, collate_fn=collate_fn)
-    optimizer = optim.Adam(model.parameters(), lr=lr)
-    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=epochs//10, gamma=0.5)
+    train_optimizer = optim.Adam(model.parameters(), lr=lr)
+    val_optimizer = optim.Adam(model.parameters(), lr=lr)
+    scheduler = optim.lr_scheduler.StepLR(train_optimizer, step_size=epochs//10, gamma=0.8)
     global_step = 0
     print("Begin training.")
     for epoch in tqdm(range(epochs)):
@@ -189,7 +191,7 @@ def train(model, save_dir, metrics_engine, batch_size=5, device="cuda", lr = 5e-
             L = data["marker_info"].shape[1]
             x = data["marker_info"].contiguous().view(B, L, -1)
 
-            optimizer.zero_grad()
+            train_optimizer.zero_grad()
             global_step += 1
 
             output = model(x)
@@ -203,9 +205,9 @@ def train(model, save_dir, metrics_engine, batch_size=5, device="cuda", lr = 5e-
 
             writer.add_scalar("lr", scheduler.get_last_lr()[0], global_step)
             losses["total_loss"].backward()
-            optimizer.step()
-            scheduler.step()
-
+            train_optimizer.step()
+        
+        scheduler.step()
         # evaluate the query set (support set)
         finetune = True
         mpjpe = torch.tensor(0.0).to(device)
@@ -224,8 +226,7 @@ def train(model, save_dir, metrics_engine, batch_size=5, device="cuda", lr = 5e-
 
                     ft_model.train()
                     for ft_i in range(B // batch_size):
-                        optimizer.zero_grad()
-                        global_step += 1
+                        val_optimizer.zero_grad()
                         x = (
                             supp_set["marker_info"][
                                 batch_size * ft_i : (ft_i + 1) * batch_size
@@ -241,7 +242,7 @@ def train(model, save_dir, metrics_engine, batch_size=5, device="cuda", lr = 5e-
                         }
                         losses = loss_fn(output, gt, smpl_model)
                         losses["total_loss"].backward()
-                        optimizer.step()
+                        val_optimizer.step()
                 else:
                     ft_model = model
 
@@ -271,7 +272,7 @@ def train(model, save_dir, metrics_engine, batch_size=5, device="cuda", lr = 5e-
                 metrics_tasks[supp_set["task_name"]] = metrics
                 for k in metrics.keys():
                     prefix = f"{k}/test"
-                    writer.add_scalar(prefix, metrics[k].cpu().item(), global_step)
+                    writer.add_scalar(prefix, metrics[k], global_step)
                 mpjpe += metrics["MPJPE [mm]"]
         if mpjpe < best_mpjpe:
             best_mpjpe = mpjpe
@@ -303,6 +304,7 @@ def test(model, metrics_engine, model_path=None, device="cuda", vis=False,
         device=device,
     )
     model.eval()
+    results = []
 
     for data in testloader:
         num_tasks = data[0]["marker_info"].shape[0]
@@ -368,9 +370,15 @@ def test(model, metrics_engine, model_path=None, device="cuda", vis=False,
             print(
                 metrics_engine.to_pretty_string(
                     metrics,
-                    f"Task {supp_set['task_name']}-{model.model_name()}-SupportSet",
+                    f"Task {supp_set['task_name']}-{model.model_name()}-QuerySet",
                 )
             )
+            results.append(metrics)
+    oa_results = {}
+    for key in results[0].keys():
+        oa_results[key] = np.mean([item[key] for item in results])
+    print(metrics_engine.to_pretty_string(oa_results, f"Overall {model.model_name()}-QuerySet"))
+    return results
 
 
 def metatrain(
@@ -516,7 +524,7 @@ def main(config):
 
     # 保存目录
     save_dir = osp.join("./results", f'{datetime.now().strftime("%Y%m%d-%H%M")}-{config.base_model}-{config.train_mode}-{config.marker_type}-{config.epochs}epochs')
-
+    
 
     # 根据配置选择模型
     if config.base_model == "sequence":
@@ -551,6 +559,8 @@ def main(config):
         # 保存目录
         if not osp.exists(save_dir):
             os.mkdir(save_dir)
+            with open(osp.join(save_dir, "config.json"), "w") as f:
+                json.dump(config.__dict__, f)
         train(
             model, save_dir, metrics_engine, batch_size=config.batch_size, device=device, lr=config.inner_lr, epochs=config.epochs,
             data_path=config.data_path,
@@ -562,6 +572,8 @@ def main(config):
         # 保存目录
         if not osp.exists(save_dir):
             os.mkdir(save_dir)
+            with open(osp.join(save_dir, "config.json"), "w") as f:
+                json.dump(config.__dict__, f)
         metatrain(
             model,
             save_dir,

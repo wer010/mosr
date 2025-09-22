@@ -138,14 +138,14 @@ class MetricsEngine(object):
         angle_mean_all = torch.mean(angle_mean_per_joint)
         angle_std_all = torch.std(angle_diffs)
 
-        metrics = {'Betas error': betas_diffs,
+        metrics = {'Betas error': betas_diffs.item(),
                    # 'MPJPE raw': eucl_dists,
-                   'MPJPE [mm]': eucl_mean_all * 1000.0,
-                   'MPJPE STD': eucl_std_all * 1000.0,
-                   'PA-MPJPE [mm]': eucl_mean_pa_all * 1000.0,
-                   'PA-MPJPE STD': eucl_std_pa_all * 1000.0,
-                   'MPJAE [deg]': angle_mean_all,
-                   'MPJAE STD': angle_std_all}
+                   'MPJPE [mm]': eucl_mean_all.item() * 1000.0,
+                   'MPJPE STD': eucl_std_all.item() * 1000.0,
+                   'PA-MPJPE [mm]': eucl_mean_pa_all.item() * 1000.0,
+                   'PA-MPJPE STD': eucl_std_pa_all.item() * 1000.0,
+                   'MPJAE [deg]': angle_mean_all.item(),
+                   'MPJAE STD': angle_std_all.item()}
         return metrics
 
     @staticmethod
