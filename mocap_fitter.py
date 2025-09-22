@@ -423,19 +423,47 @@ def metatrain(
                 qry_set = {key: value[t] for key, value in data[1].items()}
                 B = supp_set["marker_info"].shape[0]
                 L = supp_set["marker_info"].shape[1]
+                with torch.backends.cudnn.flags(enabled=False):
+                    with higher.innerloop_ctx(
+                        model, inner_opt, copy_initial_weights=False, track_higher_grads=True
+                    ) as (fnet, diffopt):
+                        # Optimize the likelihood of the support set by taking
+                        # gradient steps w.r.t. the model's parameters.
+                        # This adapts the model's meta-parameters to the task.
+                        # higher is able to automatically keep copies of
+                        # your network's parameters as they are being updated.
+                        for inner_l in range(inner_loop_num):
+                            for inner_i in range(B // inner_batch_size):
+                                x = (
+                                    supp_set["marker_info"][
+                                        inner_batch_size
+                                        * inner_i : (inner_i + 1)
+                                        * inner_batch_size
+                                    ]
+                                    .contiguous()
+                                    .view(inner_batch_size, L, -1)
+                                )
+                                output = fnet(x)
+                                gt = {
+                                    key: value[
+                                        inner_batch_size
+                                        * inner_i : (inner_i + 1)
+                                        * inner_batch_size
+                                    ]
+                                    for key, value in supp_set.items()
+                                    if key != "task_name"
+                                }
+                                spt_loss = loss_fn(output, gt, smpl_model)
+                                diffopt.step(spt_loss["total_loss"])
 
-                with higher.innerloop_ctx(
-                    model, inner_opt, copy_initial_weights=False, track_higher_grads=True
-                ) as (fnet, diffopt):
-                    # Optimize the likelihood of the support set by taking
-                    # gradient steps w.r.t. the model's parameters.
-                    # This adapts the model's meta-parameters to the task.
-                    # higher is able to automatically keep copies of
-                    # your network's parameters as they are being updated.
-                    for inner_l in range(inner_loop_num):
+                        # The final set of adapted parameters will induce some
+                        # final loss and accuracy on the query dataset.
+                        # These will be used to update the model's meta-parameters.
+                        total_qry_loss = torch.tensor(0.0, device=device)
+
                         for inner_i in range(B // inner_batch_size):
                             x = (
-                                supp_set["marker_info"][
+                                qry_set["marker_info"][
                                     inner_batch_size
                                     * inner_i : (inner_i + 1)
                                     * inner_batch_size
@@ -450,41 +478,13 @@ def metatrain(
                                     * inner_i : (inner_i + 1)
                                     * inner_batch_size
                                 ]
-                                for key, value in supp_set.items()
+                                for key, value in qry_set.items()
                                 if key != "task_name"
                             }
-                            spt_loss = loss_fn(output, gt, smpl_model)
-                            diffopt.step(spt_loss["total_loss"])
-
-                    # The final set of adapted parameters will induce some
-                    # final loss and accuracy on the query dataset.
-                    # These will be used to update the model's meta-parameters.
-                    total_qry_loss = torch.tensor(0.0, device=device)
-
-                    for inner_i in range(B // inner_batch_size):
-                        x = (
-                            qry_set["marker_info"][
-                                inner_batch_size
-                                * inner_i : (inner_i + 1)
-                                * inner_batch_size
-                            ]
-                            .contiguous()
-                            .view(inner_batch_size, L, -1)
-                        )
-                        output = fnet(x)
-                        gt = {
-                            key: value[
-                                inner_batch_size
-                                * inner_i : (inner_i + 1)
-                                * inner_batch_size
-                            ]
-                            for key, value in qry_set.items()
-                            if key != "task_name"
-                        }
-                        qry_loss = loss_fn(output, gt, smpl_model)
-                        total_qry_loss += qry_loss["total_loss"]
-                        qry_losses.append(qry_loss)
-                    total_qry_loss.backward()
+                            qry_loss = loss_fn(output, gt, smpl_model)
+                            total_qry_loss += qry_loss["total_loss"]
+                            qry_losses.append(qry_loss)
+                        total_qry_loss.backward()
 
             if writer is not None:
                 mode_prefix = "train"
