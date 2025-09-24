@@ -9,8 +9,8 @@ from geo_utils import estimate_lcs_with_curv, estimate_lcs_with_faces, invert_se
 from pytorch3d.ops.knn import  knn_points
 import torch.nn.functional as F
 from utils import visualize
-from tqdm import tqdm
 import math
+
 class StageOneFitter(torch.nn.Module):
     def __init__(self,
                  num_frames = 12,
@@ -335,7 +335,9 @@ class FrameModel(torch.nn.Module):
                  trans_size,
                  num_layers,
                  hidden_size,
-                 m_dropout = 0):
+                 m_dropout = 0,
+                 rela_x = True,
+                 only_pose = False):
         super(FrameModel, self).__init__()
         self._init_args = dict(
             input_size=input_size,
@@ -344,14 +346,17 @@ class FrameModel(torch.nn.Module):
             trans_size=trans_size,
             num_layers=num_layers,
             hidden_size=hidden_size,
-            m_dropout=m_dropout)
+            m_dropout=m_dropout,
+            rela_x=rela_x,
+            only_pose=only_pose)
         self.input_size = input_size
         self.betas_size = betas_size
         self.poses_size = poses_size
         self.trans_size = trans_size
         self.num_layers = num_layers
         self.hidden_size = hidden_size
-        self.rela_x = True
+        self.rela_x = rela_x
+        self.only_pose = only_pose
         if self.rela_x:
             self.input_size = self.input_size + 3
 
@@ -382,10 +387,14 @@ class FrameModel(torch.nn.Module):
         # Estimate pose.
         x = self.from_input(x)
         x = self.blocks(x)
+        
         pose_hat = self.to_pose(x)
         tran_hat = self.to_tran(x)
-        s = self.to_shape(x)
-        shape_hat = torch.mean(s, dim=1, keepdim=True)
+        if self.only_pose:
+            shape_hat = torch.zeros([x.shape[0], self.betas_size], device=x.device)
+        else:
+            s = self.to_shape(x)
+            shape_hat = torch.mean(s, dim=1, keepdim=True)
 
         return {'poses': pose_hat,
                 'betas': shape_hat,
@@ -540,6 +549,134 @@ class SequenceModel(torch.nn.Module):
         new_model.load_state_dict(copy.deepcopy(self.state_dict()))
         return new_model
 
+class TransformerModel(torch.nn.Module):
+    """
+    基于Transformer的序列模型，实现与SequenceModel类似的接口。
+    """
+
+    def __init__(self,
+                 input_size,
+                 betas_size,
+                 poses_size,
+                 trans_size,
+                 num_layers,
+                 hidden_size,
+                 m_dropout=0,
+                 nhead=4,
+                 m_bidirectional=True,  # 该参数无实际作用，仅保持接口一致
+                 model_type='transformer'  # 保持接口一致
+                 ):
+        super(TransformerModel, self).__init__()
+        self.input_size = input_size
+        self.betas_size = betas_size
+        self.poses_size = poses_size
+        self.trans_size = trans_size
+        self.num_layers = num_layers
+        self.hidden_size = hidden_size
+        self.nhead = nhead
+        self.m_dropout = m_dropout
+        self._init_args = dict(
+            input_size=input_size,
+            betas_size=betas_size,
+            poses_size=poses_size,
+            trans_size=trans_size,
+            num_layers=num_layers,
+            hidden_size=hidden_size,
+            m_dropout=m_dropout,
+            nhead=nhead,
+            m_bidirectional=m_bidirectional,
+            model_type=model_type
+        )
+        self.rela_x = True
+
+        # 如果使用rela_x，则输入维度+3
+        if self.rela_x:
+            self.input_size = self.input_size + 3
+
+        if m_dropout > 0.0:
+            self.input_drop = torch.nn.Dropout(p=m_dropout)
+        else:
+            self.input_drop = torch.nn.Identity()
+
+        # 输入投影到hidden_size
+        self.input_proj = torch.nn.Linear(self.input_size, self.hidden_size)
+
+        # 位置编码
+        self.pos_encoder = torch.nn.Parameter(torch.zeros(1, 512, self.hidden_size))  # 假设最大序列长度512
+        torch.nn.init.normal_(self.pos_encoder, mean=0, std=0.02)
+
+        # Transformer Encoder
+        encoder_layer = torch.nn.TransformerEncoderLayer(
+            d_model=self.hidden_size,
+            nhead=self.nhead,
+            dim_feedforward=self.hidden_size * 4,
+            dropout=m_dropout,
+            activation='relu',
+            batch_first=True
+        )
+        self.transformer_encoder = torch.nn.TransformerEncoder(
+            encoder_layer,
+            num_layers=self.num_layers
+        )
+
+        # 输出层
+        self.to_pose = torch.nn.Linear(self.hidden_size, self.poses_size)
+        self.to_tran = torch.nn.Linear(self.hidden_size, self.trans_size)
+        self.to_shape = MLP(
+            input_size=self.hidden_size,
+            output_size=self.betas_size,
+            hidden_size=self.hidden_size,
+            num_layers=2,
+            dropout_p=m_dropout,
+            skip_connection=False,
+            use_batch_norm=False
+        )
+
+    def model_name(self):
+        base_name = "Transformer-{}x{}".format(self.num_layers, self.hidden_size)
+        return base_name
+
+    def forward(self, x, is_new_sequence=True):
+        # x: (B, L, input_size)
+        if self.rela_x:
+            x = x.view(x.shape[0], x.shape[1], -1, 3)
+            x_c = torch.mean(x, dim=-2, keepdim=True)
+            x_rela = x - x_c
+            x = torch.concatenate([x_c, x_rela], dim=-2).view(x.shape[0], x.shape[1], -1)
+
+        x = self.input_drop(x)
+        x = self.input_proj(x)  # (B, L, hidden_size)
+
+        # 加入位置编码
+        seq_len = x.shape[1]
+        pos_emb = self.pos_encoder[:, :seq_len, :]
+        x = x + pos_emb
+
+        # Transformer编码
+        x = self.transformer_encoder(x)  # (B, L, hidden_size)
+
+        pose_hat = self.to_pose(x)
+        tran_hat = self.to_tran(x)
+        s = self.to_shape(x)
+        shape_hat = torch.mean(s, dim=1, keepdim=True)
+
+        return {
+            'poses': pose_hat,
+            'betas': shape_hat,
+            'trans': tran_hat
+        }
+
+    def clone(self):
+        # 记录原模型的 device
+        device = next(self.parameters()).device
+
+        # 创建新的同构模型
+        new_model = type(self)(**self._init_args).to(device)
+
+        # 拷贝参数
+        new_model.load_state_dict(copy.deepcopy(self.state_dict()))
+        return new_model
+
 
 class VRNN(torch.nn.Module):
 
@@ -664,75 +801,6 @@ class VRNN(torch.nn.Module):
         new_model.load_state_dict(copy.deepcopy(self.state_dict()))
         return new_model
 
-
-
-class MAML():
-    def __init__(self, model, tasks, inner_lr, meta_lr, K=10, inner_steps=1, tasks_per_meta_batch=1000):
-        self.tasks = tasks
-        self.model = model
-        self.weights = list(model.parameters())  # the maml weights we will be meta-optimising
-        self.criterion = torch.nn.MSELoss()
-        self.meta_optimiser = torch.optim.Adam(self.weights, meta_lr)
-
-        # hyperparameters
-        self.inner_lr = inner_lr
-        self.meta_lr = meta_lr
-        self.K = K
-        self.inner_steps = inner_steps  # with the current design of MAML, >1 is unlikely to work well
-        self.tasks_per_meta_batch = tasks_per_meta_batch
-
-        # metrics
-        self.plot_every = 10
-        self.print_every = 500
-        self.meta_losses = []
-
-    def inner_loop(self, task):
-        # reset inner model to current maml weights
-        temp_weights = [w.clone() for w in self.weights]
-
-        # perform training on data sampled from task
-        X, y = task.sample_data(self.K)
-        for step in range(self.inner_steps):
-            loss = self.criterion(self.model.parameterised(X, temp_weights), y) / self.K
-
-            # compute grad and update inner loop weights
-            grad = torch.autograd.grad(loss, temp_weights)
-            temp_weights = [w - self.inner_lr * g for w, g in zip(temp_weights, grad)]
-
-        # sample new data for meta-update and compute loss
-        X, y = task.sample_data(self.K)
-        loss = self.criterion(self.model.parameterised(X, temp_weights), y) / self.K
-
-        return loss
-
-    def main_loop(self, num_iterations):
-        epoch_loss = 0
-
-        for iteration in range(1, num_iterations + 1):
-
-            # compute meta loss
-            meta_loss = 0
-            for i in range(self.tasks_per_meta_batch):
-                task = self.tasks.sample_task()
-                meta_loss += self.inner_loop(task)
-
-            # compute meta gradient of loss with respect to maml weights
-            meta_grads = torch.autograd.grad(meta_loss, self.weights)
-
-            # assign meta gradient to weights and take optimisation step
-            for w, g in zip(self.weights, meta_grads):
-                w.grad = g
-            self.meta_optimiser.step()
-
-            # log metrics
-            epoch_loss += meta_loss.item() / self.tasks_per_meta_batch
-
-            if iteration % self.print_every == 0:
-                print("{}/{}. loss: {}".format(iteration, num_iterations, epoch_loss / self.plot_every))
-
-            if iteration % self.plot_every == 0:
-                self.meta_losses.append(epoch_loss / self.plot_every)
-                epoch_loss = 0
 
 def main():
 

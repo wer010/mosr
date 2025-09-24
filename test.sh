@@ -1,0 +1,1 @@
+python /home/lanhai/PycharmProjects/mosr/mocap_fitter.py --base_model frame --model_type lstm --train_mode test --marker_type rbm --model_path results/20250924-0020-frame-meta-rbm-1000epochs --epochs_ft 10

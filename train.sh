@@ -1,0 +1,1 @@
+python /home/lanhai/PycharmProjects/mosr/mocap_fitter.py --base_model frame --model_type gru --train_mode meta --marker_type rbm --tasks_num 5 --epochs 1000

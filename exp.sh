@@ -1,1 +1,0 @@
-python mocap_fitter.py --base_model resnet --train_mode pretrain --epochs 1000 --batch_size 5 --tasks_num 1 --inner_loop_num 1 --data_path /home/lanhai/restore/dataset/mocap/mosr/ --smpl_model_path /home/lanhai/restore/dataset/mocap/models/smpl/SMPL_NEUTRAL.npz
