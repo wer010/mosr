@@ -423,7 +423,9 @@ class SequenceModel(torch.nn.Module):
                  hidden_size,
                  m_dropout = 0,
                  model_type = 'lstm',
-                 m_bidirectional= True):
+                 m_bidirectional= True,
+                 rela_x = True,
+                 only_pose = False):
         super(SequenceModel, self).__init__()
         self.input_size = input_size
         self.betas_size = betas_size
@@ -440,13 +442,16 @@ class SequenceModel(torch.nn.Module):
             hidden_size=hidden_size,
             m_dropout=m_dropout,
             m_bidirectional=m_bidirectional,
-            model_type=model_type
+            model_type=model_type,
+            rela_x=rela_x,
+            only_pose=only_pose
         )
         self.is_bidirectional = m_bidirectional
         self.num_directions = 2 if m_bidirectional else 1
         self.model_type = model_type
         self.learn_init_state = True
-        self.rela_x = True
+        self.rela_x = rela_x
+        self.only_pose = only_pose
         if self.rela_x:
             self.input_size = self.input_size + 3
 
@@ -471,7 +476,6 @@ class SequenceModel(torch.nn.Module):
 
         self.to_pose = torch.nn.Linear(hidden_size * self.num_directions, poses_size)
         self.to_tran = torch.nn.Linear(hidden_size * self.num_directions, trans_size)
-
         self.to_shape = MLP(input_size=hidden_size * self.num_directions,
                             output_size=betas_size, hidden_size=hidden_size,
                             num_layers=2, dropout_p=m_dropout,
@@ -531,8 +535,11 @@ class SequenceModel(torch.nn.Module):
         tran_hat = self.to_tran(lstm_out)
         # Estimate shape if configured.
 
-        s = self.to_shape(lstm_out)  # (N, F, N_BETAS)
-        shape_hat = torch.mean(s, dim=1, keepdim=True)
+        if self.only_pose:
+            shape_hat = torch.zeros([lstm_out.shape[0], self.betas_size], device=lstm_out.device)
+        else:
+            s = self.to_shape(lstm_out)  # (N, F, N_BETAS)
+            shape_hat = torch.mean(s, dim=1, keepdim=True)
 
         return {'poses': pose_hat,
                 'betas': shape_hat,

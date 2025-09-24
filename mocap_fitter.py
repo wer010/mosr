@@ -139,6 +139,8 @@ def train(
 
         scheduler.step()
         # evaluate the query set (support set)
+        
+
         finetune = True
         mpjpe = torch.tensor(0.0).to(device)
         metrics_tasks = {}
@@ -511,7 +513,8 @@ def main(config):
             hidden_size=config.hidden_size,
             m_dropout=config.dropout if hasattr(config, "dropout") else 0.0,
             m_bidirectional=True,
-            model_type=config.model_type
+            model_type=config.model_type,
+            only_pose=config.only_pose
         ).to(device)
     elif config.base_model == "frame":
         model = FrameModel(
@@ -522,7 +525,7 @@ def main(config):
             num_layers=config.num_layers,
             hidden_size=config.hidden_size,
             m_dropout=config.dropout if hasattr(config, "dropout") else 0.0,
-            only_pose=True
+            only_pose=config.only_pose
         ).to(device)
     else:
         raise ValueError(f"未知的base_model: {config.base_model}")
@@ -659,6 +662,9 @@ if __name__ == "__main__":
         default="lstm",
         choices=["rnn", "lstm", "gru"],
         help="Model type.",
+    )
+    parser.add_argument(
+        "--only_pose", type=bool, default=False, help="Only predict pose."
     )
 
     parser.add_argument(
