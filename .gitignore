@@ -1,5 +1,6 @@
 /aitviewer/data/
 /results/
+/data/
 
 # Ignore Python cache and IDE files
 __pycache__/

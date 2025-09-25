@@ -13,7 +13,7 @@ from tqdm import tqdm
 from geo_utils import estimate_lcs_with_faces
 from utils import visualize, visualize_aitviewer
 from collections import defaultdict
-from pytorch3d.transforms import matrix_to_axis_angle
+from pytorch3d.transforms import matrix_to_axis_angle, axis_angle_to_quaternion, quaternion_to_axis_angle, quaternion_multiply, quaternion_invert
 
 rigidbody_marker_id = {
     "head": 335,
@@ -33,6 +33,8 @@ rigidbody_marker_id = {
     "right_foot": 6742,
     # "right_hip":4297
 }
+rbm_parent = [1,-1,1,2,3,1,5,6,
+                1,8,9,1,11,12]
 moshpp_marker_id = {
     "ARIEL": 411,
     "C7": 3470,
@@ -89,9 +91,33 @@ moshpp_marker_id = {
     "T10": 3016,
 }
 
+def rela_x_fn(x, marker_type = 'moshpp'):
+    if marker_type == 'moshpp':
+        x_c = torch.mean(x, dim = -2, keepdim=True)
+        x_rela = x - x_c
+        ret = torch.concatenate([x_c, x_rela], dim = -2)
+    elif marker_type == 'rbm':
+        x_pos = x[..., :3]
+        x_ori = x[..., 3:]
+        pos_center = torch.mean(x_pos, dim = -2, keepdim=True)
+        rel_pos = x_pos - pos_center
+
+        quat_ori = axis_angle_to_quaternion(x_ori)
+        rbm_parent_tensor = torch.tensor(rbm_parent, dtype=torch.int).to(x.device)
+        quat_ori_parent = quat_ori[..., rbm_parent_tensor,:]
+        identity = quat_ori_parent.new_tensor([1, 0, 0, 0])
+        quat_ori_parent[...,1,:] = identity
+        rel_quat_ori = quaternion_multiply(quaternion_invert(quat_ori_parent), quat_ori)
+        rel_ori = quaternion_to_axis_angle(rel_quat_ori)
+
+        ret = torch.concatenate([pos_center, rel_pos, rel_ori], dim = -2)
+    return ret
+
 class MetaBabelDataset(Dataset):
     # Dataset class for meta training, the getitem func return data of a task
-    def __init__(self, path, device = 'cuda'):
+    def __init__(self, path, use_rela_x = False, marker_type = 'moshpp', device = 'cuda'):
+        self.use_rela_x = use_rela_x
+        self.marker_type = marker_type
 
         self.device = device
         with open(path, 'rb') as f:
@@ -109,11 +135,15 @@ class MetaBabelDataset(Dataset):
         data = self.data[self.task_id[int(t)]]
         data = {key:value.to(self.device) for key, value in data.items()}
         data['task_name'] = self.task_id[int(t)]
+        if self.use_rela_x:
+            data['marker_info'] = rela_x_fn(data['marker_info'], self.marker_type)
         return data
 
 
 class BabelDataset(Dataset):
-    def __init__(self, path, device='cuda'):
+    def __init__(self, path, use_rela_x = False, marker_type = 'moshpp', device='cuda'):
+        self.use_rela_x = use_rela_x
+        self.marker_type = marker_type
         self.device = device
         with open(path, 'rb') as f:
             raw_data = pickle.load(f)
@@ -131,6 +161,8 @@ class BabelDataset(Dataset):
 
     def __getitem__(self, t):
         data = {key:value[t].to(self.device) for key, value in self.data.items()}
+        if self.use_rela_x:
+            data['marker_info'] = rela_x_fn(data['marker_info'], self.marker_type)
         return data
 
 

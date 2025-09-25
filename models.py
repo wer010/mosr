@@ -336,7 +336,6 @@ class FrameModel(torch.nn.Module):
                  num_layers,
                  hidden_size,
                  m_dropout = 0,
-                 rela_x = True,
                  only_pose = False):
         super(FrameModel, self).__init__()
         self._init_args = dict(
@@ -347,7 +346,6 @@ class FrameModel(torch.nn.Module):
             num_layers=num_layers,
             hidden_size=hidden_size,
             m_dropout=m_dropout,
-            rela_x=rela_x,
             only_pose=only_pose)
         self.input_size = input_size
         self.betas_size = betas_size
@@ -355,10 +353,8 @@ class FrameModel(torch.nn.Module):
         self.trans_size = trans_size
         self.num_layers = num_layers
         self.hidden_size = hidden_size
-        self.rela_x = rela_x
         self.only_pose = only_pose
-        if self.rela_x:
-            self.input_size = self.input_size + 3
+        
 
         self.from_input = torch.nn.Linear(self.input_size, self.hidden_size)
         self.blocks = torch.nn.Sequential(
@@ -378,11 +374,7 @@ class FrameModel(torch.nn.Module):
         return base_name
 
     def forward(self, x):
-        if self.rela_x:
-            x = x.view(x.shape[0],x.shape[1], -1, 3)
-            x_c = torch.mean(x, dim = -2, keepdim=True)
-            x_rela = x - x_c
-            x = torch.concatenate([x_c, x_rela], dim = -2).view(x.shape[0],x.shape[1],-1)
+        
 
         # Estimate pose.
         x = self.from_input(x)
@@ -391,7 +383,7 @@ class FrameModel(torch.nn.Module):
         pose_hat = self.to_pose(x)
         tran_hat = self.to_tran(x)
         if self.only_pose:
-            shape_hat = torch.zeros([x.shape[0], self.betas_size], device=x.device)
+            shape_hat = torch.zeros([x.shape[0], 1, self.betas_size], device=x.device)
         else:
             s = self.to_shape(x)
             shape_hat = torch.mean(s, dim=1, keepdim=True)
@@ -422,9 +414,8 @@ class SequenceModel(torch.nn.Module):
                  num_layers,
                  hidden_size,
                  m_dropout = 0,
-                 model_type = 'lstm',
+                 model_type = 'gru',
                  m_bidirectional= True,
-                 rela_x = True,
                  only_pose = False):
         super(SequenceModel, self).__init__()
         self.input_size = input_size
@@ -443,17 +434,14 @@ class SequenceModel(torch.nn.Module):
             m_dropout=m_dropout,
             m_bidirectional=m_bidirectional,
             model_type=model_type,
-            rela_x=rela_x,
             only_pose=only_pose
         )
         self.is_bidirectional = m_bidirectional
         self.num_directions = 2 if m_bidirectional else 1
         self.model_type = model_type
         self.learn_init_state = True
-        self.rela_x = rela_x
         self.only_pose = only_pose
-        if self.rela_x:
-            self.input_size = self.input_size + 3
+
 
         if m_dropout > 0.0:
             self.input_drop = torch.nn.Dropout(p=m_dropout)
@@ -462,7 +450,7 @@ class SequenceModel(torch.nn.Module):
 
         self.init_state = None
         self.final_state = None
-        if self.learn_init_state:
+        if model_type != 'cnn' and self.learn_init_state:
             self.to_init_state_h = torch.nn.Linear(self.input_size, self.hidden_size * self.num_layers * self.num_directions)
             self.to_init_state_c = torch.nn.Linear(self.input_size, self.hidden_size * self.num_layers * self.num_directions)
 
@@ -472,8 +460,55 @@ class SequenceModel(torch.nn.Module):
             self.model = torch.nn.GRU(self.input_size, self.hidden_size, self.num_layers, bidirectional=self.is_bidirectional, batch_first=True)
         elif model_type == 'rnn':
             self.model = torch.nn.RNN(self.input_size, self.hidden_size, self.num_layers, bidirectional=self.is_bidirectional, batch_first=True)
+        elif model_type == 'cnn':
+            kernel_size = 61
+            conv_layers = []
+            # 第一层卷积
+            conv = torch.nn.Conv1d(
+                    in_channels=self.input_size,
+                    out_channels=self.hidden_size,
+                    kernel_size=kernel_size,
+                    stride=1,
+                    padding=(kernel_size-1)//2  # 保持时序长度不变
+                )
+            bn = torch.nn.BatchNorm1d(self.hidden_size)
+            act = torch.nn.ReLU()
+            conv_layers.extend([conv, bn, act])
+            # 剩余卷积层
+            for i in range(num_layers-1):
+                conv = torch.nn.Conv1d(
+                    in_channels=self.hidden_size,
+                    out_channels=self.hidden_size,
+                    kernel_size=kernel_size,
+                    stride=1,
+                    padding=(kernel_size-1)//2  # 保持时序长度不变
+                )
+                bn = torch.nn.BatchNorm1d(self.hidden_size)
+                act = torch.nn.ReLU()
+                conv_layers.extend([conv, bn, act])
+            self.model = torch.nn.Sequential(*conv_layers)
+            self.num_directions = 1
+        elif model_type == 'transformer':
+            self.pos_encoder = torch.nn.Parameter(torch.zeros(1, 300, self.hidden_size))  # 假设最大序列长度512
+            torch.nn.init.normal_(self.pos_encoder, mean=0, std=0.02)
+            input_proj = torch.nn.Linear(self.input_size, self.hidden_size)
+            # Transformer Encoder
+            encoder_layer = torch.nn.TransformerEncoderLayer(
+                d_model=self.hidden_size,
+                nhead=4,
+                dim_feedforward=self.hidden_size * 2,
+                dropout=m_dropout,
+                activation='relu',
+                batch_first=True
+            )
+            self.transformer_encoder = torch.nn.TransformerEncoder(
+                encoder_layer,
+                num_layers=self.num_layers
+            )
+            self.model = torch.nn.Sequential(input_proj, self.transformer_encoder)
+            self.num_directions = 1
 
-
+            
         self.to_pose = torch.nn.Linear(hidden_size * self.num_directions, poses_size)
         self.to_tran = torch.nn.Linear(hidden_size * self.num_directions, trans_size)
         self.to_shape = MLP(input_size=hidden_size * self.num_directions,
@@ -511,34 +546,34 @@ class SequenceModel(torch.nn.Module):
             self.final_state = None
         self.init_state = self.final_state
 
-        if self.rela_x:
-            x = x.view(x.shape[0],x.shape[1], -1, 3)
-            x_c = torch.mean(x, dim = -2, keepdim=True)
-            x_rela = x - x_c
-            x = torch.concatenate([x_c, x_rela], dim = -2).view(x.shape[0],x.shape[1],-1)
-
-
         inputs_ = self.input_drop(x)
 
-        # Get the initial state of the recurrent cells.
-        self.init_state = self.cell_init(inputs_)
 
         # Feed it to the LSTM.
         # Disable CuDNN for higher-order gradients (meta-learning compatibility)
         # with torch.backends.cudnn.flags(enabled=False):
-        lstm_out, final_state = self.model(inputs_, self.init_state)
-        self.final_state = final_state  
+        if self.model_type == 'cnn':
+            inputs_ = inputs_.transpose(1, 2)
+            out = self.model(inputs_)
+            out = out.transpose(1, 2)
+        elif self.model_type == 'transformer':
+            out = self.model(inputs_)
+        else:
+            # Get the initial state of the recurrent cells.
+            self.init_state = self.cell_init(inputs_)
+            out, final_state = self.model(inputs_, self.init_state)
+            self.final_state = final_state  
 
 
-        pose_hat = self.to_pose(lstm_out)  # (N, F, self.output_size)
+        pose_hat = self.to_pose(out)  # (N, F, self.output_size)
 
-        tran_hat = self.to_tran(lstm_out)
+        tran_hat = self.to_tran(out)
         # Estimate shape if configured.
 
         if self.only_pose:
-            shape_hat = torch.zeros([lstm_out.shape[0], self.betas_size], device=lstm_out.device)
+            shape_hat = torch.zeros([x.shape[0], 1, self.betas_size], device=x.device)
         else:
-            s = self.to_shape(lstm_out)  # (N, F, N_BETAS)
+            s = self.to_shape(out)  # (N, F, N_BETAS)
             shape_hat = torch.mean(s, dim=1, keepdim=True)
 
         return {'poses': pose_hat,
@@ -556,6 +591,7 @@ class SequenceModel(torch.nn.Module):
         new_model.load_state_dict(copy.deepcopy(self.state_dict()))
         return new_model
 
+# 基于Transformer的序列模型
 class TransformerModel(torch.nn.Module):
     """
     基于Transformer的序列模型，实现与SequenceModel类似的接口。
@@ -570,8 +606,7 @@ class TransformerModel(torch.nn.Module):
                  hidden_size,
                  m_dropout=0,
                  nhead=4,
-                 m_bidirectional=True,  # 该参数无实际作用，仅保持接口一致
-                 model_type='transformer'  # 保持接口一致
+                 only_pose = False
                  ):
         super(TransformerModel, self).__init__()
         self.input_size = input_size
@@ -591,14 +626,10 @@ class TransformerModel(torch.nn.Module):
             hidden_size=hidden_size,
             m_dropout=m_dropout,
             nhead=nhead,
-            m_bidirectional=m_bidirectional,
-            model_type=model_type
+            only_pose=only_pose
         )
-        self.rela_x = True
+        self.only_pose = only_pose
 
-        # 如果使用rela_x，则输入维度+3
-        if self.rela_x:
-            self.input_size = self.input_size + 3
 
         if m_dropout > 0.0:
             self.input_drop = torch.nn.Dropout(p=m_dropout)
@@ -609,14 +640,14 @@ class TransformerModel(torch.nn.Module):
         self.input_proj = torch.nn.Linear(self.input_size, self.hidden_size)
 
         # 位置编码
-        self.pos_encoder = torch.nn.Parameter(torch.zeros(1, 512, self.hidden_size))  # 假设最大序列长度512
+        self.pos_encoder = torch.nn.Parameter(torch.zeros(1, 300, self.hidden_size))  # 假设最大序列长度512
         torch.nn.init.normal_(self.pos_encoder, mean=0, std=0.02)
 
         # Transformer Encoder
         encoder_layer = torch.nn.TransformerEncoderLayer(
             d_model=self.hidden_size,
             nhead=self.nhead,
-            dim_feedforward=self.hidden_size * 4,
+            dim_feedforward=self.hidden_size * 2,
             dropout=m_dropout,
             activation='relu',
             batch_first=True
@@ -645,12 +676,7 @@ class TransformerModel(torch.nn.Module):
 
     def forward(self, x, is_new_sequence=True):
         # x: (B, L, input_size)
-        if self.rela_x:
-            x = x.view(x.shape[0], x.shape[1], -1, 3)
-            x_c = torch.mean(x, dim=-2, keepdim=True)
-            x_rela = x - x_c
-            x = torch.concatenate([x_c, x_rela], dim=-2).view(x.shape[0], x.shape[1], -1)
-
+        
         x = self.input_drop(x)
         x = self.input_proj(x)  # (B, L, hidden_size)
 
@@ -664,8 +690,11 @@ class TransformerModel(torch.nn.Module):
 
         pose_hat = self.to_pose(x)
         tran_hat = self.to_tran(x)
-        s = self.to_shape(x)
-        shape_hat = torch.mean(s, dim=1, keepdim=True)
+        if self.only_pose:
+            shape_hat = torch.zeros([x.shape[0], 1, self.betas_size], device=x.device)
+        else:
+            s = self.to_shape(x)
+            shape_hat = torch.mean(s, dim=1, keepdim=True)
 
         return {
             'poses': pose_hat,

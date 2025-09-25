@@ -8,7 +8,7 @@ from glob import glob
 import os.path as osp
 from data import rigidbody_marker_id, moshpp_marker_id, BabelDataset, MetaBabelDataset, virtual_marker, MetaCollate
 from torch.utils.data import DataLoader, random_split
-from models import Moshpp, FrameModel, SequenceModel
+from models import Moshpp, FrameModel, SequenceModel, TransformerModel
 from metric import MetricsEngine
 from smpl import Smpl
 from tqdm import tqdm
@@ -19,7 +19,6 @@ import torch.optim as optim
 from tensorboardX import SummaryWriter
 import higher
 from geo_utils import estimate_lcs_with_faces
-
 
 def loss_rec_fn(output, gt, smpl_model=None):
     pos_offset = 0.0095
@@ -84,6 +83,7 @@ def loss_fn(output, gt, smpl_model=None, do_fk=True):
     return losses
 
 
+
 def train(
     train_dataset,
     test_dataset,
@@ -94,7 +94,7 @@ def train(
     device="cuda",
     lr=5e-4,
     epochs=400,
-    smpl_model_path="/home/lanhai/restore/dataset/mocap/models/smpl/SMPL_NEUTRAL.npz",
+    smpl_model_path="data/models/smpl/SMPL_NEUTRAL.npz",
 ):
     writer = SummaryWriter(os.path.join(save_dir, "logs"))
     best_mpjpe = torch.inf
@@ -120,6 +120,7 @@ def train(
             B = data["marker_info"].shape[0]
             L = data["marker_info"].shape[1]
             x = data["marker_info"].contiguous().view(B, L, -1)
+
 
             train_optimizer.zero_grad()
             global_step += 1
@@ -166,6 +167,7 @@ def train(
                             .contiguous()
                             .view(batch_size, L, -1)
                         )
+
                         output = ft_model(x)
                         gt = {
                             key: value[batch_size * ft_i : (ft_i + 1) * batch_size]
@@ -225,9 +227,9 @@ def test(
     model_path=None,
     device="cuda",
     vis=False,
-    smpl_model_path="/home/lanhai/restore/dataset/mocap/models/smpl/SMPL_NEUTRAL.npz",
+    smpl_model_path="data/models/smpl/SMPL_NEUTRAL.npz",
     epochs_ft=1,
-    batch_size=5
+    batch_size=5,
 ):
 
     collate_fn = MetaCollate()
@@ -252,7 +254,7 @@ def test(
         L = supp_set["marker_info"].shape[1]
         ft_model = model.clone()
         optimizer = optim.Adam(ft_model.parameters(), lr=5e-4)
-
+        
         ft_model.train()
         for e in range(epochs_ft):
             for ft_i in range(B // batch_size):
@@ -372,7 +374,7 @@ def metatrain(
     meta_lr=1e-4,
     inner_lr=5e-4,
     epochs=1000,
-    smpl_model_path="/home/lanhai/restore/dataset/mocap/models/smpl/SMPL_NEUTRAL.npz",
+    smpl_model_path="data/models/smpl/SMPL_NEUTRAL.npz",
 ):
     smpl_model = Smpl(
         model_path=smpl_model_path,
@@ -496,8 +498,12 @@ def main(config):
         input_dim = 6
     else:
         raise ValueError(f"未知的marker_type: {marker_type}")
-
     n_marker = len(vid)
+
+    if config.use_rela_x:
+        input_dim = input_dim*n_marker + 3
+    else:
+        input_dim = input_dim*n_marker
 
     # 保存目录
     save_dir = osp.join("./results", f'{datetime.now().strftime("%Y%m%d-%H%M")}-{config.base_model}-{config.train_mode}-{config.marker_type}-{config.epochs}epochs')
@@ -505,7 +511,7 @@ def main(config):
     # 根据配置选择模型
     if config.base_model == "sequence":
         model = SequenceModel(
-            input_size=input_dim * n_marker,
+            input_size=input_dim,
             betas_size=10,
             poses_size=24 * 3,
             trans_size=3,
@@ -518,7 +524,7 @@ def main(config):
         ).to(device)
     elif config.base_model == "frame":
         model = FrameModel(
-            input_size=input_dim * n_marker,
+            input_size=input_dim,
             betas_size=10,
             poses_size=24 * 3,
             trans_size=3,
@@ -535,6 +541,8 @@ def main(config):
     train_fp = osp.join(config.data_path, "meta_train_data_with_normalize_betas_marker.pkl")
     test_fp = osp.join(config.data_path, "meta_val_data_with_normalize_betas_marker.pkl")
 
+
+    
     # 根据训练模式选择训练方式
     if config.train_mode == "pretrain":
         # 保存目录
@@ -542,8 +550,8 @@ def main(config):
             os.mkdir(save_dir)
             with open(osp.join(save_dir, "config.json"), "w") as f:
                 json.dump(config.__dict__, f)
-        train_dataset = BabelDataset(train_fp, device=device)
-        test_dataset = MetaBabelDataset(test_fp, device=device)
+        train_dataset = BabelDataset(train_fp, use_rela_x=config.use_rela_x, marker_type=config.marker_type, device=device)
+        test_dataset = MetaBabelDataset(test_fp, use_rela_x=config.use_rela_x, marker_type=config.marker_type, device=device)
         train(
             train_dataset,
             test_dataset,
@@ -564,8 +572,8 @@ def main(config):
             os.mkdir(save_dir)
             with open(osp.join(save_dir, "config.json"), "w") as f:
                 json.dump(config.__dict__, f)
-        train_dataset = MetaBabelDataset(train_fp, device=device)
-        test_dataset = MetaBabelDataset(test_fp, device=device)
+        train_dataset = MetaBabelDataset(train_fp, use_rela_x=config.use_rela_x, marker_type=config.marker_type, device=device)
+        test_dataset = MetaBabelDataset(test_fp, use_rela_x=config.use_rela_x, marker_type=config.marker_type, device=device)
         metatrain(
             train_dataset,
             test_dataset,
@@ -580,13 +588,13 @@ def main(config):
             meta_lr=config.meta_lr,
             inner_lr=config.inner_lr,
             epochs=config.epochs,
-            smpl_model_path=config.smpl_model_path
+            smpl_model_path=config.smpl_model_path,
         )
         test_dir = save_dir
     elif config.train_mode == "test":
         # 如果有指定测试目录则用，否则用当前save_dir
         assert config.model_path is not None, "model_path is required for test mode"
-        test_dataset = MetaBabelDataset(test_fp, device=device)
+        test_dataset = MetaBabelDataset(test_fp, use_rela_x=config.use_rela_x, marker_type=config.marker_type, device=device)
         test_dir = config.model_path
     else:
         raise ValueError(f"未知的train_mode: {config.train_mode}")
@@ -600,7 +608,7 @@ def main(config):
         device,
         vis=False,
         smpl_model_path=config.smpl_model_path,
-        epochs_ft=config.epochs_ft,
+        epochs_ft=config.epochs_ft
     )
 
     return
@@ -615,13 +623,13 @@ if __name__ == "__main__":
     parser.add_argument(
         "--data_path",
         type=str,
-        default="/home/lanhai/restore/dataset/mocap/mosr/",
+        default="data/mosr/",
         help="Path to dataset.",
     )
     parser.add_argument(
         "--smpl_model_path",
         type=str,
-        default="/home/lanhai/restore/dataset/mocap/models/smpl/SMPL_NEUTRAL.npz",
+        default="data/models/smpl/SMPL_NEUTRAL.npz",
         help="Path to smpl model.",
     )
     parser.add_argument(
@@ -660,13 +668,15 @@ if __name__ == "__main__":
         "--model_type",
         type=str,
         default="lstm",
-        choices=["rnn", "lstm", "gru"],
+        choices=["rnn", "lstm", "gru", "cnn", "transformer"],
         help="Model type.",
     )
     parser.add_argument(
         "--only_pose", type=bool, default=False, help="Only predict pose."
     )
-
+    parser.add_argument(
+        "--use_rela_x", type=bool, default=True, help="Use relative x."
+    )
     parser.add_argument(
         "--hidden_size", type=int, default=256, help="Hidden size for RNN/MLP layers."
     )
