@@ -19,6 +19,10 @@ import torch.optim as optim
 from tensorboardX import SummaryWriter
 import higher
 from geo_utils import estimate_lcs_with_faces
+torch.backends.cuda.enable_flash_sdp(False)
+torch.backends.cuda.enable_mem_efficient_sdp(False)
+torch.backends.cuda.enable_math_sdp(True)
+
 
 def loss_rec_fn(output, gt, smpl_model=None):
     pos_offset = 0.0095
