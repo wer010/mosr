@@ -83,44 +83,34 @@ def loss_fn(output, gt, smpl_model=None, do_fk=True):
     return losses
 
 
-
 def train(
     train_dataset,
     test_dataset,
     model,
+    smpl_model,
     save_dir,
     metrics_engine,
     batch_size=5,
     device="cuda",
     lr=5e-4,
     epochs=400,
-    smpl_model_path="data/models/smpl/SMPL_NEUTRAL.npz",
 ):
     writer = SummaryWriter(os.path.join(save_dir, "logs"))
     best_mpjpe = torch.inf
     # 普通训练
-    smpl_model = Smpl(
-        model_path=smpl_model_path,
-        device=device,
-    )
-    model.train()
-
-    collate_fn = MetaCollate()
 
     trainloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    testloader = DataLoader(test_dataset, batch_size=1, collate_fn=collate_fn)
     train_optimizer = optim.Adam(model.parameters(), lr=lr)
-    val_optimizer = optim.Adam(model.parameters(), lr=lr)
     scheduler = optim.lr_scheduler.StepLR(train_optimizer, step_size=epochs//10, gamma=0.8)
     global_step = 0
     print("Begin training.")
     for epoch in tqdm(range(epochs)):
+        model.train()
 
         for data in trainloader:
             B = data["marker_info"].shape[0]
             L = data["marker_info"].shape[1]
             x = data["marker_info"].contiguous().view(B, L, -1)
-
 
             train_optimizer.zero_grad()
             global_step += 1
@@ -139,97 +129,38 @@ def train(
             train_optimizer.step()
 
         scheduler.step()
+
         # evaluate the query set (support set)
-        
 
-        finetune = True
-        mpjpe = torch.tensor(0.0).to(device)
-        metrics_tasks = {}
-        for data in testloader:
-            num_tasks = data[0]["marker_info"].shape[0]
-            for t in range(num_tasks):
-                supp_set = {key: value[t] for key, value in data[0].items()}
-                qry_set = {key: value[t] for key, value in data[1].items()}
-                if finetune:
-                    # print('Begin finetuning')
-                    B = supp_set["marker_info"].shape[0]
-                    L = supp_set["marker_info"].shape[1]
+        eval_result = test(
+            test_dataset = test_dataset,
+            model = model,
+            smpl_model = smpl_model,
+            metrics_engine = metrics_engine,
+            device = device,
+            vis=False,
+            epochs_ft=1,
+        )
+        for key, value in eval_result["qry_set_overall"].items():
+            writer.add_scalar(f"qry_set_overall/{key}", value, epoch)
+        if eval_result["qry_set_overall"]["MPJPE [mm]"] < best_mpjpe:
+            best_mpjpe = eval_result["qry_set_overall"]["MPJPE [mm]"]
 
-                    ft_model = model.clone()
-
-                    ft_model.train()
-                    for ft_i in range(B // batch_size):
-                        val_optimizer.zero_grad()
-                        x = (
-                            supp_set["marker_info"][
-                                batch_size * ft_i : (ft_i + 1) * batch_size
-                            ]
-                            .contiguous()
-                            .view(batch_size, L, -1)
-                        )
-
-                        output = ft_model(x)
-                        gt = {
-                            key: value[batch_size * ft_i : (ft_i + 1) * batch_size]
-                            for key, value in supp_set.items()
-                            if key != "task_name"
-                        }
-                        losses = loss_fn(output, gt, smpl_model)
-                        losses["total_loss"].backward()
-                        val_optimizer.step()
-                else:
-                    ft_model = model
-
-                ft_model.eval()
-                B = qry_set["marker_info"].shape[0]
-                L = qry_set["marker_info"].shape[1]
-
-                output_list = []
-                for val_i in range(B):
-                    x = qry_set["marker_info"][val_i].contiguous().view(1, L, -1)
-                    output = ft_model(x)
-                    output["joints"] = smpl_model(
-                        betas=output["betas"].reshape(-1),
-                        body_pose=output["poses"].reshape(L, -1)[:, 3:],
-                        global_orient=output["poses"].reshape(L, -1)[:, 0:3],
-                        transl=output["trans"].reshape(L, -1),
-                    )["joints"].reshape(1, L, -1, 3)
-                    output_list.append(output)
-                # vis_diff_aitviewer('smpl', gt_full_poses=support_set['poses'][i], gt_betas=support_set['betas'][i], gt_trans=support_set['trans'][i],
-                #                    pred_full_poses=output['poses'].squeeze(), pred_betas=output['betas'].squeeze(),
-                #                    pred_trans=output['trans'].squeeze())
-                output = {}
-                for key in output_list[0].keys():
-                    output[key] = torch.concatenate([item[key] for item in output_list])
-
-                metrics = metrics_engine.compute(output, qry_set)
-                metrics_tasks[supp_set["task_name"]] = metrics
-                for k in metrics.keys():
-                    prefix = f"{k}/test"
-                    writer.add_scalar(prefix, metrics[k], global_step)
-                mpjpe += metrics["MPJPE [mm]"]
-        if mpjpe < best_mpjpe:
-            best_mpjpe = mpjpe
-            for key in metrics_tasks:
-                print(
-                    metrics_engine.to_pretty_string(
-                        metrics_tasks[key],
-                        f"Task {key}-{model.model_name()}-SupportSet",
-                    )
-                )
+            print('*****************Best model saved*****************')
             torch.save(model.state_dict(), osp.join(save_dir, "model.pth"))
 
 
 def test(
     test_dataset,
     model,
+    smpl_model,
     metrics_engine,
     model_path=None,
     device="cuda",
     vis=False,
-    smpl_model_path="data/models/smpl/SMPL_NEUTRAL.npz",
     epochs_ft=1,
     batch_size=5,
+    eval_supp_set=False,
 ):
 
     collate_fn = MetaCollate()
@@ -239,13 +170,15 @@ def test(
             torch.load(osp.join(model_path, "model.pth"), map_location=device)
         )
 
-    smpl_model = Smpl(
-        model_path=smpl_model_path,
-        device=device,
-    )
-    model.eval()
-    supp_results = []
-    qry_results = []
+    if eval_supp_set:
+        eval_results = {
+            "supp_set": [],
+            "qry_set": []
+        }
+    else:
+        eval_results = {
+            "qry_set": []
+        }
     for data in testloader:
         supp_set = {key: value[0] for key, value in data[0].items()}
         qry_set = {key: value[0] for key, value in data[1].items()}
@@ -254,7 +187,7 @@ def test(
         L = supp_set["marker_info"].shape[1]
         ft_model = model.clone()
         optimizer = optim.Adam(ft_model.parameters(), lr=5e-4)
-        
+
         ft_model.train()
         for e in range(epochs_ft):
             for ft_i in range(B // batch_size):
@@ -275,95 +208,71 @@ def test(
                 optimizer.step()
 
         ft_model.eval()
-        
-        # evaluate the support set
-        B = supp_set["marker_info"].shape[0]
-        L = supp_set["marker_info"].shape[1]
-        supp_output_list = []
-        for val_i in range(B):
-            x = supp_set["marker_info"][val_i].contiguous().view(1, L, -1)
-            output = ft_model(x)
-            output["joints"] = smpl_model(
-                betas=output["betas"].reshape(-1),
-                body_pose=output["poses"].reshape(L, -1)[:, 3:],
-                global_orient=output["poses"].reshape(L, -1)[:, 0:3],
-                transl=output["trans"].reshape(L, -1),
-            )["joints"].reshape(1, L, -1, 3)
-            supp_output_list.append(output)
-            if vis:
-                vis_diff_aitviewer(
-                    "smpl",
-                    gt_full_poses=supp_set["poses"][val_i],
-                    gt_betas=supp_set["betas"][val_i],
-                    gt_trans=supp_set["trans"][val_i],
-                    pred_full_poses=output["poses"].squeeze(),
-                    pred_betas=output["betas"].squeeze(),
-                    pred_trans=output["trans"].squeeze(),
+        if eval_supp_set:
+            eval_data = {
+                'supp_set': supp_set,
+                'qry_set': qry_set,
+                }
+        else:
+            eval_data = {
+                'qry_set': qry_set,
+            }
+        # evaluate the support/query set
+        for set_name, data in eval_data.items():
+            B = data["marker_info"].shape[0]
+            L = data["marker_info"].shape[1]
+            output_list = []
+            # 逐个sequence进行评估
+            for val_i in range(B):
+                x = data["marker_info"][val_i].contiguous().view(1, L, -1)
+                output = ft_model(x)
+                output["joints"] = smpl_model(
+                    betas=output["betas"].reshape(-1),
+                    body_pose=output["poses"].reshape(L, -1)[:, 3:],
+                    global_orient=output["poses"].reshape(L, -1)[:, 0:3],
+                    transl=output["trans"].reshape(L, -1),
+                )["joints"].reshape(1, L, -1, 3)
+                output_list.append(output)
+                # 可视化当前sequence
+                if vis:
+                    vis_diff_aitviewer(
+                        "smpl",
+                        gt_full_poses=data["poses"][val_i],
+                        gt_betas=data["betas"][val_i],
+                        gt_trans=data["trans"][val_i],
+                        pred_full_poses=output["poses"].squeeze(),
+                        pred_betas=output["betas"].squeeze(),
+                        pred_trans=output["trans"].squeeze(),
+                    )
+            # 合并所有sequence的输出，一次性计算评估指标
+            outputs = {}
+            for key in output_list[0].keys():
+                outputs[key] = torch.concatenate([item[key] for item in output_list])
+            metrics = metrics_engine.compute(outputs, data)
+            print(
+                metrics_engine.to_pretty_string(
+                    metrics,
+                    f"Task {supp_set['task_name']}-{model.model_name()}-{set_name}",
                 )
-        output = {}
-        for key in supp_output_list[0].keys():
-            output[key] = torch.concatenate([item[key] for item in supp_output_list])
-        metrics = metrics_engine.compute(output, supp_set)
-        supp_results.append(metrics)
-        print(
-            metrics_engine.to_pretty_string(
-                metrics,
-                f"Task {supp_set['task_name']}-{model.model_name()}-SupportSet",
             )
-        )
+            eval_results[set_name].append(metrics)
 
-        # evaluate the query set
-        B = qry_set["marker_info"].shape[0]
-        L = qry_set["marker_info"].shape[1]
-        qry_output_list = []
-        for val_i in range(B):
-            x = qry_set["marker_info"][val_i].contiguous().view(1, L, -1)
-            output = ft_model(x)
-            output["joints"] = smpl_model(
-                betas=output["betas"].reshape(-1),
-                body_pose=output["poses"].reshape(L, -1)[:, 3:],
-                global_orient=output["poses"].reshape(L, -1)[:, 0:3],
-                transl=output["trans"].reshape(L, -1),
-            )["joints"].reshape(1, L, -1, 3)
-            qry_output_list.append(output)
-            if vis:
-                vis_diff_aitviewer(
-                    "smpl",
-                    gt_full_poses=qry_set["poses"][val_i],
-                    gt_betas=qry_set["betas"][val_i],
-                    gt_trans=qry_set["trans"][val_i],
-                    pred_full_poses=output["poses"].squeeze(),
-                    pred_betas=output["betas"].squeeze(),
-                    pred_trans=output["trans"].squeeze(),
-                )
-        output = {}
-        for key in qry_output_list[0].keys():
-            output[key] = torch.concatenate([item[key] for item in qry_output_list])
-
-        metrics = metrics_engine.compute(output, qry_set)
-        qry_results.append(metrics)
-        print(
-            metrics_engine.to_pretty_string(
-                metrics,
-                f"Task {supp_set['task_name']}-{model.model_name()}-QuerySet",
-            )
-        )
-        
     oa_results = {}
-    for key in supp_results[0].keys():
-        oa_results[key] = np.mean([item[key] for item in supp_results])
-    print(metrics_engine.to_pretty_string(oa_results, f"Overall {model.model_name()}-SupportSet"))
+    ret = {}
+    for key, item in eval_results.items():
+        for k in item[0].keys():
+            oa_results[k] = np.mean([i[k] for i in item])
+        print(metrics_engine.to_pretty_string(oa_results, f"Overall {model.model_name()}-{key}"))
+        ret[key + "_overall"] = oa_results
 
-    for key in qry_results[0].keys():
-        oa_results[key] = np.mean([item[key] for item in qry_results])
-    print(metrics_engine.to_pretty_string(oa_results, f"Overall {model.model_name()}-QuerySet"))
-    return supp_results, qry_results
+    return ret
 
 
 def metatrain(
     train_dataset,
     test_dataset,
     model,
+    smpl_model,
     save_dir,
     metrics_engine,
     device="cuda",
@@ -374,22 +283,20 @@ def metatrain(
     meta_lr=1e-4,
     inner_lr=5e-4,
     epochs=1000,
-    smpl_model_path="data/models/smpl/SMPL_NEUTRAL.npz",
 ):
-    smpl_model = Smpl(
-        model_path=smpl_model_path,
-        device=device,
-    )
+
 
     writer = SummaryWriter(os.path.join(save_dir, "logs"))
     collate_fn = MetaCollate(shuffle=True, support_ratio=support_set_ratio)
 
     trainloader = DataLoader(train_dataset, batch_size=tasks_num, collate_fn=collate_fn)
-    model.train()
+    
     meta_opt = optim.Adam(model.parameters(), lr=meta_lr)
     scheduler = optim.lr_scheduler.StepLR(meta_opt, step_size=epochs//10, gamma=0.8)
+    best_mpjpe = torch.inf
 
     for epoch in tqdm(range(epochs)):
+        model.train()
         for data in trainloader:
             task_num = data[0]["marker_info"].shape[0]
 
@@ -403,7 +310,7 @@ def metatrain(
                 qry_set = {key: value[t] for key, value in data[1].items()}
                 B = supp_set["marker_info"].shape[0]
                 L = supp_set["marker_info"].shape[1]
-                with torch.backends.cudnn.flags(enabled=False):
+                with torch.backends.cudnn.flags(enabled=True):
                     with higher.innerloop_ctx(
                         model, inner_opt, copy_initial_weights=False, track_higher_grads=True
                     ) as (fnet, diffopt):
@@ -481,7 +388,22 @@ def metatrain(
 
             meta_opt.step()
         scheduler.step()
-    torch.save(model.state_dict(), osp.join(save_dir, "model.pth"))
+        eval_result = test(
+            test_dataset = test_dataset,
+            model = model,
+            smpl_model = smpl_model,
+            metrics_engine = metrics_engine,
+            device = device,
+            vis=False,
+            epochs_ft=1,
+        )
+        for key, value in eval_result["qry_set_overall"].items():
+            writer.add_scalar(f"qry_set_overall/{key}", value, epoch)
+        if eval_result["qry_set_overall"]["MPJPE [mm]"] < best_mpjpe:
+            best_mpjpe = eval_result["qry_set_overall"]["MPJPE [mm]"]
+
+            print('*****************Best model saved*****************')
+            torch.save(model.state_dict(), osp.join(save_dir, "model.pth"))
 
 
 def main(config):
@@ -541,7 +463,10 @@ def main(config):
     train_fp = osp.join(config.data_path, "meta_train_data_with_normalize_betas_marker.pkl")
     test_fp = osp.join(config.data_path, "meta_val_data_with_normalize_betas_marker.pkl")
 
-
+    smpl_model = Smpl(
+            model_path=config.smpl_model_path,
+            device=device,
+        )
     
     # 根据训练模式选择训练方式
     if config.train_mode == "pretrain":
@@ -556,13 +481,13 @@ def main(config):
             train_dataset,
             test_dataset,
             model,
+            smpl_model,
             save_dir,
             metrics_engine,
             batch_size=config.batch_size,
             device=device,
             lr=config.inner_lr,
             epochs=config.epochs,
-            smpl_model_path=config.smpl_model_path,
         )
         test_dir = save_dir
     elif config.train_mode == "meta":
@@ -578,6 +503,7 @@ def main(config):
             train_dataset,
             test_dataset,
             model,
+            smpl_model,
             save_dir,
             metrics_engine,
             device=device,
@@ -588,7 +514,6 @@ def main(config):
             meta_lr=config.meta_lr,
             inner_lr=config.inner_lr,
             epochs=config.epochs,
-            smpl_model_path=config.smpl_model_path,
         )
         test_dir = save_dir
     elif config.train_mode == "test":
@@ -601,14 +526,15 @@ def main(config):
 
     # 测试模型
     test(
-        test_dataset,
-        model,
-        metrics_engine,
-        test_dir,
-        device,
+        test_dataset = test_dataset,
+        model = model,
+        smpl_model = smpl_model,
+        metrics_engine = metrics_engine,
+        model_path = test_dir,
+        device = device,
         vis=False,
-        smpl_model_path=config.smpl_model_path,
-        epochs_ft=config.epochs_ft
+        epochs_ft=config.epochs_ft,
+        eval_supp_set=True
     )
 
     return
