@@ -465,7 +465,7 @@ def main(config):
     metrics_engine = MetricsEngine()
 
     train_fp = osp.join(config.data_path, "meta_train_data_with_normalize_betas_marker.pkl")
-    test_fp = osp.join(config.data_path, "meta_train_data_with_normalize_betas_marker.pkl")
+    test_fp = osp.join(config.data_path, "meta_val_data_with_normalize_betas_marker.pkl")
 
     smpl_model = Smpl(
             model_path=config.smpl_model_path,
