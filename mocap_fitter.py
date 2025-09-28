@@ -9,7 +9,7 @@ import os.path as osp
 from data import rigidbody_marker_id, moshpp_marker_id, BabelDataset, MetaBabelDataset, virtual_marker, MetaCollate
 from torch.utils.data import DataLoader, random_split
 from models import Moshpp, FrameModel, SequenceModel, TransformerModel
-from metric import MetricsEngine, axis_angle_distance
+from metric import MetricsEngine
 from smpl import Smpl
 from tqdm import tqdm
 from utils import visualize, vis_diff
@@ -22,6 +22,41 @@ from geo_utils import estimate_lcs_with_faces
 torch.backends.cuda.enable_flash_sdp(False)
 torch.backends.cuda.enable_mem_efficient_sdp(False)
 torch.backends.cuda.enable_math_sdp(True)
+
+
+def geodesic_loss(aa1, aa2):
+    """
+    最简洁的轴角距离计算
+    基于公式：d = 2*arccos(cos(θ₁/2)cos(θ₂/2) + sin(θ₁/2)sin(θ₂/2)|n₁·n₂|)
+    输入aa1,aa2：形状为(N,3)，为两个姿态的轴角表示
+    输出dist：形状为(N)，输出两个姿态的测地线距离
+    """
+
+    # 角度和轴
+    theta1 = torch.norm(aa1, dim=-1)
+    theta2 = torch.norm(aa2, dim=-1)
+
+    # 单位轴（处理零向量）
+    n1 = aa1 / (theta1.unsqueeze(-1) + 1e-8)
+    n2 = aa2 / (theta2.unsqueeze(-1) + 1e-8)
+
+    # 轴点积的绝对值
+    axis_dot = torch.abs(torch.sum(n1 * n2, dim=-1))
+    axis_dot = torch.clamp(axis_dot, -1.0, 1.0)
+
+    # 半角的三角函数
+    cos_half1 = torch.cos(theta1 / 2)
+    cos_half2 = torch.cos(theta2 / 2)
+    sin_half1 = torch.sin(theta1 / 2)
+    sin_half2 = torch.sin(theta2 / 2)
+
+    # 测地距离
+    cos_dist = cos_half1 * cos_half2 + sin_half1 * sin_half2 * axis_dot
+    cos_dist = torch.clamp(cos_dist, -1.0, 1.0)  # 距离应该在[0, π/2]
+
+    distance = 4*(1 - cos_dist**2)
+
+    return torch.mean(distance)
 
 
 def loss_rec_fn(output, gt, smpl_model=None):
@@ -64,7 +99,7 @@ def loss_fn(output, gt, smpl_model=None, do_fk=True):
     pose_loss = mse_loss(output["poses"], gt["poses"])
     shape_loss = l1_loss(output["betas"].view(B, -1), gt["betas"])
     tran_loss = mse_loss(output["trans"], gt["trans"])
-    angle_loss = torch.mean(axis_angle_distance(output["poses"].reshape(B, L, -1, 3), gt["poses"].reshape(B, L, -1, 3)))
+    angle_loss = geodesic_loss(output["poses"].reshape(B, L, -1, 3), gt["poses"].reshape(B, L, -1, 3))
     if do_fk:
         joints_hat = smpl_model(
             betas=output["betas"].expand(-1, L, -1).reshape(B * L, -1),
@@ -75,7 +110,7 @@ def loss_fn(output, gt, smpl_model=None, do_fk=True):
         fk_loss = mse_loss(joints_hat, gt["joints"])
     else:
         fk_loss = torch.zeros(1, device=device)
-    total_loss = 10*angle_loss + shape_loss + tran_loss + 0.1 * fk_loss
+    total_loss = angle_loss + shape_loss + tran_loss + 0.1 * fk_loss
 
     losses = {
         "pose": angle_loss,
