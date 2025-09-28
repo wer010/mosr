@@ -64,7 +64,7 @@ def loss_fn(output, gt, smpl_model=None, do_fk=True):
     pose_loss = mse_loss(output["poses"], gt["poses"])
     shape_loss = l1_loss(output["betas"].view(B, -1), gt["betas"])
     tran_loss = mse_loss(output["trans"], gt["trans"])
-    angle_loss = axis_angle_distance(output["poses"].reshape(B, L, -1, 3), gt["poses"].reshape(B, L, -1, 3))
+    angle_loss = torch.mean(axis_angle_distance(output["poses"].reshape(B, L, -1, 3), gt["poses"].reshape(B, L, -1, 3)))
     if do_fk:
         joints_hat = smpl_model(
             betas=output["betas"].expand(-1, L, -1).reshape(B * L, -1),
@@ -75,7 +75,7 @@ def loss_fn(output, gt, smpl_model=None, do_fk=True):
         fk_loss = mse_loss(joints_hat, gt["joints"])
     else:
         fk_loss = torch.zeros(1, device=device)
-    total_loss = angle_loss + shape_loss + tran_loss + 0.1 * fk_loss
+    total_loss = 10*angle_loss + shape_loss + tran_loss + 0.1 * fk_loss
 
     losses = {
         "pose": angle_loss,
