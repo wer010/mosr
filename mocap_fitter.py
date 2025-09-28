@@ -41,7 +41,7 @@ def geodesic_loss(aa1, aa2):
     n2 = aa2 / (theta2.unsqueeze(-1) + 1e-8)
 
     # 轴点积的绝对值
-    axis_dot = torch.abs(torch.sum(n1 * n2, dim=-1))
+    axis_dot = torch.sum(n1 * n2, dim=-1)
     axis_dot = torch.clamp(axis_dot, -1.0, 1.0)
 
     # 半角的三角函数
@@ -51,8 +51,8 @@ def geodesic_loss(aa1, aa2):
     sin_half2 = torch.sin(theta2 / 2)
 
     # 测地距离
-    cos_dist = cos_half1 * cos_half2 + sin_half1 * sin_half2 * axis_dot
-    cos_dist = torch.clamp(cos_dist, -1.0, 1.0)  # 距离应该在[0, π/2]
+    cos_dist = torch.abs(cos_half1 * cos_half2 + sin_half1 * sin_half2 * axis_dot)
+    cos_dist = torch.clamp(cos_dist, 0.0, 1.0)  # 距离应该在[0, π/2]
 
     distance = 4*(1 - cos_dist**2)
 
