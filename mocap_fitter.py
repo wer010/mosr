@@ -9,7 +9,7 @@ import os.path as osp
 from data import rigidbody_marker_id, moshpp_marker_id, BabelDataset, MetaBabelDataset, virtual_marker, MetaCollate
 from torch.utils.data import DataLoader, random_split
 from models import Moshpp, FrameModel, SequenceModel, TransformerModel
-from metric import MetricsEngine
+from metric import MetricsEngine, axis_angle_distance
 from smpl import Smpl
 from tqdm import tqdm
 from utils import visualize, vis_diff
@@ -64,7 +64,7 @@ def loss_fn(output, gt, smpl_model=None, do_fk=True):
     pose_loss = mse_loss(output["poses"], gt["poses"])
     shape_loss = l1_loss(output["betas"].view(B, -1), gt["betas"])
     tran_loss = mse_loss(output["trans"], gt["trans"])
-
+    angle_loss = axis_angle_distance(output["poses"].reshape(B, L, -1, 3), gt["poses"].reshape(B, L, -1, 3))
     if do_fk:
         joints_hat = smpl_model(
             betas=output["betas"].expand(-1, L, -1).reshape(B * L, -1),
@@ -75,10 +75,10 @@ def loss_fn(output, gt, smpl_model=None, do_fk=True):
         fk_loss = mse_loss(joints_hat, gt["joints"])
     else:
         fk_loss = torch.zeros(1, device=device)
-    total_loss = pose_loss + shape_loss + tran_loss + 0.1 * fk_loss
+    total_loss = angle_loss + shape_loss + tran_loss + 0.1 * fk_loss
 
     losses = {
-        "pose": pose_loss,
+        "pose": angle_loss,
         "shape": shape_loss,
         "tran": tran_loss,
         "fk": fk_loss,
@@ -465,7 +465,7 @@ def main(config):
     metrics_engine = MetricsEngine()
 
     train_fp = osp.join(config.data_path, "meta_train_data_with_normalize_betas_marker.pkl")
-    test_fp = osp.join(config.data_path, "meta_val_data_with_normalize_betas_marker.pkl")
+    test_fp = osp.join(config.data_path, "meta_train_data_with_normalize_betas_marker.pkl")
 
     smpl_model = Smpl(
             model_path=config.smpl_model_path,
@@ -536,7 +536,7 @@ def main(config):
         metrics_engine = metrics_engine,
         model_path = test_dir,
         device = device,
-        vis=False,
+        vis=True,
         epochs_ft=config.epochs_ft,
         eval_supp_set=True
     )

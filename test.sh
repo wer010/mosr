@@ -1,1 +1,1 @@
-python /home/lanhai/PycharmProjects/mosr/mocap_fitter.py --base_model sequence --model_type transformer --train_mode test --marker_type rbm --model_path results/20250926-0725-sequence-pretrain-rbm-1000epochs --use_rela_x True --only_pose True --epochs_ft 10
+python /home/lanhai/PycharmProjects/mosr/mocap_fitter.py --base_model sequence --model_type transformer --train_mode test --marker_type rbm --model_path results/20250926-0725-sequence-pretrain-rbm-1000epochs --use_rela_x True --only_pose True --epochs_ft 0
