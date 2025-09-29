@@ -184,10 +184,12 @@ def train(
             writer.add_scalar(f"qry_set_overall/{key}", value, epoch)
         if eval_result["qry_set_overall"]["MPJPE [mm]"] < best_mpjpe:
             best_mpjpe = eval_result["qry_set_overall"]["MPJPE [mm]"]
+            best_epoch = epoch
 
             print('*****************Best model saved*****************')
             torch.save(model.state_dict(), osp.join(save_dir, "model.pth"))
-
+    with open(osp.join(save_dir, "best_epoch.txt"), "w") as f:
+        f.write(f'The best epoch is {best_epoch}.')
 
 def test(
     test_dataset,
@@ -498,9 +500,13 @@ def main(config):
         raise ValueError(f"未知的base_model: {config.base_model}")
 
     metrics_engine = MetricsEngine()
+    if config.only_pose:
+        train_fp = osp.join(config.data_path, "meta_train_data_with_normalize_betas_marker.pkl")
+        test_fp = osp.join(config.data_path, "meta_val_data_with_normalize_betas_marker.pkl")
+    else:
+        train_fp = osp.join(config.data_path, "metatrain.pkl")
+        test_fp = osp.join(config.data_path, "metatest.pkl")
 
-    train_fp = osp.join(config.data_path, "meta_train_data_with_normalize_betas_marker.pkl")
-    test_fp = osp.join(config.data_path, "meta_val_data_with_normalize_betas_marker.pkl")
 
     smpl_model = Smpl(
             model_path=config.smpl_model_path,
@@ -571,7 +577,7 @@ def main(config):
         metrics_engine = metrics_engine,
         model_path = test_dir,
         device = device,
-        vis=True,
+        vis=False,
         epochs_ft=config.epochs_ft,
         eval_supp_set=True
     )
